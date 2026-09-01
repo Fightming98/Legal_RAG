@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.env
+venv/
+
+# Node
+node_modules/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Project
+chroma_db/
+chroma_db.broken/
+chroma_db.broken_v2/
+backend/tests/chroma_db_test/
+*.log
+docs/
+backend/data/
+
+# 一次性实验 / 修复脚本（_ 开头且非 __init__）
+backend/scripts/_[a-z]*.py
+
+# Local config
+.claude/
