@@ -1,7 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { Send, Activity, ChevronDown, ChevronUp, Download, Save, Clock, Sparkles } from 'lucide-react'
+import { Send, Activity, ChevronDown, ChevronUp, Download, Save, Clock, Sparkles, ArrowDown, BookOpen } from 'lucide-react'
 import { streamChat, getSystemInfo, saveChatRecord, listChatRecords, getChatRecordDownloadUrl } from '../services/api'
+
+// 距离底部小于该值（像素）时视为“停留在底部”，流式输出才继续自动跟随。
+// 取较小值，确保用户只要轻轻向上滚动就会立即停止自动跟随。
+const STICK_THRESHOLD = 8
 
 export default function ChatPage() {
   const [messages, setMessages] = useState([])
@@ -28,13 +32,39 @@ export default function ChatPage() {
   const [records, setRecords] = useState([])
   const [showRecords, setShowRecords] = useState(false)
 
-  const bottomRef = useRef(null)
-  const abortRef = useRef(null)  // 当前流式请求，在组件卸载时中断
+  const messagesRef = useRef(null)  // 消息滚动容器
+  const abortRef = useRef(null)     // 当前流式请求，在组件卸载时中断
+  // 是否让流式输出自动跟随到底部：用户向上滚动后置为 false，
+  // 这样新增的思考 / 回答内容不会把页面强行拉回底部。
+  const stickToBottomRef = useRef(true)
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false)
 
   useEffect(() => {
-    // 流式输出期间用即时滚动，避免平滑动画堆积
-    bottomRef.current?.scrollIntoView({ behavior: loading ? 'auto' : 'smooth' })
+    if (!stickToBottomRef.current) return
+    const el = messagesRef.current
+    if (!el) return
+    // 流式输出期间使用即时滚动，避免平滑动画堆积
+    el.scrollTop = el.scrollHeight
   }, [messages, liveMonitor, loading])
+
+  // 用户滚动时更新“是否停留在底部”；只有回到底部附近才恢复自动跟随
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesRef.current
+    if (!el) return
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+    const atBottom = distance <= STICK_THRESHOLD
+    stickToBottomRef.current = atBottom
+    setShowJumpToBottom(!atBottom)
+  }, [])
+
+  // 点击「回到底部」：立即跳转并恢复自动跟随
+  const jumpToBottom = useCallback(() => {
+    const el = messagesRef.current
+    if (!el) return
+    stickToBottomRef.current = true
+    setShowJumpToBottom(false)
+    el.scrollTop = el.scrollHeight
+  }, [])
 
   // 离开页面时中断未完成的流式请求
   useEffect(() => () => abortRef.current?.abort(), [])
@@ -79,6 +109,10 @@ export default function ChatPage() {
   const handleSend = async () => {
     const q = input.trim()
     if (!q || loading) return
+
+    // 主动发送新问题：强制回到底部并恢复自动跟随
+    stickToBottomRef.current = true
+    setShowJumpToBottom(false)
 
     const assistantId = `assistant-${Date.now()}`
     setMessages(prev => [...prev, { role: 'user', content: q }])
@@ -325,7 +359,12 @@ export default function ChatPage() {
         </label>
       </div>
 
-      <div className="chat-messages">
+      <div className="chat-messages-wrap">
+        <div
+          className="chat-messages"
+          ref={messagesRef}
+          onScroll={handleMessagesScroll}
+        >
         {messages.length === 0 && (
           <div className="empty-state">
             <div className="icon">&#9878;</div>
@@ -391,20 +430,7 @@ export default function ChatPage() {
                 </div>
               )}
 
-              {msg.sources?.length > 0 && (
-                <div className="sources-section">
-                  <h4>参考来源 ({msg.sources.length})</h4>
-                  {msg.sources.map((src, j) => (
-                    <div key={j} className="source-card">
-                      <div className="source-meta">
-                        {src.metadata?.law_name || src.metadata?.guiding_number || src.metadata?.source_file || '来源'}
-                        {src.metadata?.article_number && ` 第${src.metadata.article_number}条`}
-                      </div>
-                      <div className="source-text">{src.content}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
+              <SourcesPanel sources={msg.sources} />
 
               {msg.metrics?.total_ms != null && (
                 <div className="metrics-bar">
@@ -426,7 +452,18 @@ export default function ChatPage() {
           </div>
         ))}
 
-        <div ref={bottomRef} />
+        </div>
+        {showJumpToBottom && (
+          <button
+            type="button"
+            className="jump-to-bottom"
+            onClick={jumpToBottom}
+            title="回到底部并继续自动跟随"
+          >
+            <ArrowDown size={14} />
+            回到底部
+          </button>
+        )}
       </div>
 
       {/* 记录历史折叠面板 */}
@@ -476,6 +513,45 @@ export default function ChatPage() {
           <Send size={16} /> 发送
         </button>
       </div>
+    </div>
+  )
+}
+
+
+// ===================== 参考来源面板 =====================
+
+// 默认折叠，手动点击标题展开；每条回答独立维护展开状态
+function SourcesPanel({ sources }) {
+  const [expanded, setExpanded] = useState(false)
+
+  if (!sources?.length) return null
+
+  return (
+    <div className="sources-section">
+      <button
+        type="button"
+        className="sources-toggle"
+        onClick={() => setExpanded(v => !v)}
+        aria-expanded={expanded}
+      >
+        <BookOpen size={13} />
+        <span>参考来源 ({sources.length})</span>
+        {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+      </button>
+
+      {expanded && (
+        <div className="sources-list">
+          {sources.map((src, j) => (
+            <div key={j} className="source-card">
+              <div className="source-meta">
+                {src.metadata?.law_name || src.metadata?.guiding_number || src.metadata?.source_file || '来源'}
+                {src.metadata?.article_number && ` 第${src.metadata.article_number}条`}
+              </div>
+              <div className="source-text">{src.content}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
