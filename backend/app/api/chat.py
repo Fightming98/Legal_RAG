@@ -1,7 +1,9 @@
 """问答 API"""
 
-from fastapi import APIRouter, HTTPException
+import openai
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+from app.core.api_key import api_key_dependency
 from app.models.schemas import ChatRequest, ChatResponse, APIResponse
 from app.services.rag_service import rag_query
 from app.services.perf_service import get_system_info
@@ -14,9 +16,9 @@ from app.services.report_service import (
 router = APIRouter(prefix="/chat", tags=["问答"])
 
 
-@router.post("", response_model=APIResponse)
+@router.post("", response_model=APIResponse, dependencies=[Depends(api_key_dependency)])
 async def chat(req: ChatRequest):
-    """RAG 问答接口，支持系统监控和质量评估"""
+    """RAG 问答接口，支持系统监控和质量评估（必须携带用户自己的 API Key）"""
     try:
         # 系统快照（问答前）
         system_before = None
@@ -56,6 +58,10 @@ async def chat(req: ChatRequest):
         result.quality = quality
 
         return APIResponse(data=result.model_dump())
+    except HTTPException:
+        raise  # 401（缺 Key/Key 非法）等语义化异常直接透传
+    except (openai.AuthenticationError, openai.RateLimitError, openai.APIConnectionError):
+        raise  # 交给 main.py 的全局处理器转成 401 / 429 / 502
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"问答服务异常: {e}")
 

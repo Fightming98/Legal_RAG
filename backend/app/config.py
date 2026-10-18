@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     API_PREFIX: str = "/api"  # API 路由统一前缀
     CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000"]  # 允许跨域访问的前端来源
 
+    # --- 用户自带 API Key ---
+    # 为 True 时，所有消耗模型的接口都必须由请求头携带用户自己的 Key，
+    # 服务端 .env 中的 SILICONFLOW_API_KEY 不再为普通请求兜底（仅脚本、
+    # 健康检查等非请求场景使用），避免公网访客消耗部署者的额度。
+    REQUIRE_USER_API_KEY: bool = True
+    API_KEY_HEADER: str = "X-SiliconFlow-API-Key"  # 前端携带密钥的请求头名称
+
     # --- 硅基流动 (SiliconFlow) / 模型 ---
     # 从 .env 读取，见仓库根目录 .env 的 SILICONFLOW_API_KEY / SILICONFLOW_BASE_URL
     SILICONFLOW_API_KEY: str = ""  # 硅基流动 API 密钥

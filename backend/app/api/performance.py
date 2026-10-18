@@ -1,7 +1,8 @@
 """性能测试 API"""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+from app.core.api_key import api_key_dependency
 from app.models.schemas import APIResponse
 from app.services.perf_service import get_system_info, run_benchmark
 from app.services.report_service import generate_report, list_reports, get_report_filepath
@@ -16,7 +17,7 @@ async def system_info():
     return APIResponse(data=info.model_dump())
 
 
-@router.post("/bench", response_model=APIResponse)
+@router.post("/bench", response_model=APIResponse, dependencies=[Depends(api_key_dependency)])
 async def benchmark(
     queries: list[str] | None = None,
     use_rerank: bool = True,
@@ -31,7 +32,7 @@ async def benchmark(
     return APIResponse(data=result.model_dump())
 
 
-@router.post("/report", response_model=APIResponse)
+@router.post("/report", response_model=APIResponse, dependencies=[Depends(api_key_dependency)])
 async def create_report(
     queries: list[str] | None = None,
     use_rerank: bool = True,

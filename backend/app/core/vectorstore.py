@@ -2,7 +2,7 @@
 
 import chromadb
 from langchain_community.vectorstores import Chroma
-from app.core.embeddings import get_embeddings
+from app.core.embeddings import get_request_embeddings
 from app.core.logging import get_logger
 from app.config import settings
 
@@ -37,7 +37,10 @@ def get_vectorstore(collection_name: str) -> Chroma:
     # 注意：collection_metadata 只在集合"首次创建"时生效，因此重建库前必须删掉旧库目录。
     store = Chroma(
         collection_name=collection_name,  # 集合名：laws / cases
-        embedding_function=get_embeddings(),  # 使用共享的 BGE-M3 embedding 实例
+        # 使用「请求级代理」而不是某个具体用户的 Embedding 实例：向量库会被
+        # 进程全局缓存，代理在每次 embed 时才按当前请求的 Key 取真实客户端，
+        # 避免 A 用户的 Key 被 B 用户复用。
+        embedding_function=get_request_embeddings(),
         client=client,  # 复用持久化客户端
         collection_metadata={
             "hnsw:sync_threshold": 200000,

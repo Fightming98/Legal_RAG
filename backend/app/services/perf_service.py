@@ -3,6 +3,7 @@
 import time
 import psutil
 import httpx
+import openai
 from app.core.llm import get_llm
 from app.core.embeddings import get_embeddings
 from app.services.rag_service import rag_query
@@ -41,12 +42,24 @@ def get_system_info() -> SystemInfo:
 
 
 async def get_provider_status() -> dict:
-    """获取硅基流动 (SiliconFlow) 模型服务状态 —— 通过 OpenAI 兼容 /models 端点探测"""
+    """获取硅基流动 (SiliconFlow) 模型服务状态 —— 通过 OpenAI 兼容 /models 端点探测
+
+    服务端未配置兜底 Key 时（推荐的生产配置）只报告 not_configured，
+    不做任何外部调用；此时普通请求都使用用户自己携带的 Key。
+    """
+    server_key = (settings.SILICONFLOW_API_KEY or "").strip()
+    if not server_key:
+        return {
+            "status": "not_configured",
+            "provider": "siliconflow",
+            "base_url": settings.SILICONFLOW_BASE_URL,
+            "detail": "服务端未配置 SILICONFLOW_API_KEY，用户需在页面配置自己的 Key。",
+        }
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.get(
                 f"{settings.SILICONFLOW_BASE_URL}/models",
-                headers={"Authorization": f"Bearer {settings.SILICONFLOW_API_KEY}"},
+                headers={"Authorization": f"Bearer {server_key}"},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -110,6 +123,9 @@ async def run_benchmark(
                 )
                 quality_details.append(qm)
 
+        except (openai.AuthenticationError, openai.RateLimitError, openai.APIConnectionError):
+            # Key 失效 / 余额不足 / 网络不可达时直接中断，避免返回一屏无意义的失败明细
+            raise
         except Exception as e:
             details.append({
                 "query": q,

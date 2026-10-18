@@ -167,10 +167,12 @@ Legal_rag/
 │   │   ├── api/                       # HTTP API 路由层
 │   │   │   ├── chat.py                # /api/chat — 问答、记录
 │   │   │   ├── knowledge.py           # /api/knowledge/* — 知识库管理
-│   │   │   └── performance.py         # /api/performance/* — 性能监控与报告
+│   │   │   ├── performance.py         # /api/performance/* — 性能监控与报告
+│   │   │   └── settings.py            # /api/settings/* — 密钥策略与 Key 校验
 │   │   ├── core/                      # 核心组件
+│   │   │   ├── api_key.py             # 请求级用户 API Key 上下文（ContextVar）
 │   │   │   ├── llm.py                 # DeepSeek-V3.2 初始化（ChatOpenAI → 硅基流动）
-│   │   │   ├── embeddings.py          # BGE-M3 初始化（OpenAIEmbeddings → 硅基流动）
+│   │   │   ├── embeddings.py          # BGE-M3 初始化（按请求动态解析 Key 的代理）
 │   │   │   ├── vectorstore.py         # ChromaDB 向量数据库（带实例缓存）
 │   │   │   ├── retriever.py           # 混合检索器（BM25 + 向量 + RRF）
 │   │   │   └── logging.py             # 日志配置
@@ -213,6 +215,7 @@ Legal_rag/
 │       ├── test_pipeline.py           # 管线配置与策略枚举
 │       ├── test_advanced_retrieval.py # 术语规范化、上下文标头
 │       ├── test_kg.py                 # 犯罪知识图谱模块
+│       ├── test_api_key.py            # 用户自带 Key：校验、上下文、401 行为
 │       └── test_queries.txt           # 测试问题集
 │
 └── frontend/
@@ -221,7 +224,9 @@ Legal_rag/
     ├── index.html                     # HTML 入口
     └── src/
         ├── main.jsx                   # React 挂载入口
-        ├── App.jsx                    # 根组件（侧边栏导航 + 页面切换）
+        ├── App.jsx                    # 根组件（侧边栏导航 + 页面切换 + Key 设置入口）
+        ├── components/
+        │   └── ApiKeySettings.jsx     # 用户 API Key 设置弹窗（校验 + 本地保存）
         ├── pages/
         │   ├── ChatPage.jsx           # 智能问答页面（管线策略配置面板）
         │   ├── KnowledgePage.jsx      # 知识库管理页面
@@ -245,18 +250,26 @@ cd Legal_rag
 
 ### 2. 配置硅基流动 API
 
-本项目模型由硅基流动（SiliconFlow）云端 API 提供，**无需本地部署模型**。注册获取密钥后：
+本项目模型由硅基流动（SiliconFlow）云端 API 提供，**无需本地部署模型**。支持两种密钥模式：
+
+- **用户自带 Key（默认，推荐公网部署）**：每个访客在页面左下角「API 设置」中填入自己的 Key，密钥只保存在其浏览器 `localStorage`，随请求通过 `X-SiliconFlow-API-Key` 请求头传给后端。未配置的访客无法使用问答、上传、重建索引和性能测试。服务端 `backend/.env` 中的 Key 仅为脚本和健康检查兜底，**不会被普通请求使用**。
+- **服务端统一 Key（本地开发/内网）**：设置 `REQUIRE_USER_API_KEY=false`，未携带 Key 的请求回退使用服务端 `.env` 中的 Key。
+
+本地开发可直接使用服务端 Key（跳过页面配置）：
 
 ```bash
 cd backend
 cp .env.example .env
-# 编辑 .env，填入你的密钥
+# 编辑 .env
 ```
 
 ```bash
 SILICONFLOW_API_KEY=sk-xxxxx
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
+REQUIRE_USER_API_KEY=false     # 本地开发回退到服务端 Key；公网部署请保持 true
 ```
+
+公网部署时建议将 `SILICONFLOW_API_KEY` 留空，并保持 `REQUIRE_USER_API_KEY=true`，从源头上避免访客消耗部署者的额度。
 
 使用的默认模型：
 - 生成：`deepseek-ai/DeepSeek-V3.2`
@@ -315,11 +328,26 @@ pytest tests/ -v
 
 所有接口响应统一包装为 `{ "code": 200, "data": ..., "message": "success" }`。启动后端后亦可直接在 `http://localhost:8000/docs`（Swagger UI）交互调试。
 
+> **鉴权说明**：默认配置下，所有消耗模型的接口（`/api/chat`、`/api/knowledge/upload`、`/api/knowledge/rebuild`、`/api/performance/bench`、`/api/performance/report`）都必须携带用户自己的 Key：
+>
+> ```
+> X-SiliconFlow-API-Key: sk-xxxxx
+> ```
+>
+> 未携带返回 `401`，Key 无效返回 `401`，额度不足/限流返回 `429`，无法连接硅基流动返回 `502`。只读列表、下载、健康检查接口不需要 Key。
+
+### 密钥设置
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/settings/key-policy` | 公开的密钥策略（是否强制用户自带 Key、请求头名称等，不含密钥内容） |
+| POST | `/api/settings/verify-key` | 用请求头中的 Key 调用硅基流动 `/models` 校验，返回脱敏 Key 与可用模型数 |
+
 ### 健康检查
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/health` | 服务健康状态、模型配置、硅基流动 provider 状态、知识库统计 |
+| GET | `/health` | 服务健康状态、模型配置、硅基流动 provider 状态、知识库统计（`provider.status` 可能为 `not_configured`：服务端未配置兜底 Key） |
 
 ### 问答
 
@@ -408,8 +436,10 @@ pytest tests/ -v
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `SILICONFLOW_API_KEY` | 空 | 硅基流动 API 密钥 |
+| `SILICONFLOW_API_KEY` | 空 | 服务端兜底密钥（用户自带 Key 模式下仅脚本/健康检查使用，公网部署建议留空） |
 | `SILICONFLOW_BASE_URL` | `https://api.siliconflow.cn/v1` | 硅基流动 OpenAI 兼容端点 |
+| `REQUIRE_USER_API_KEY` | `true` | 是否强制请求携带用户自己的 Key（`false` 时回退服务端 Key） |
+| `API_KEY_HEADER` | `X-SiliconFlow-API-Key` | 前端携带用户 Key 的请求头名称 |
 | `LLM_MODEL` | `deepseek-ai/DeepSeek-V3.2` | 生成模型 |
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | Embedding 模型 |
 | `LLM_TEMPERATURE` | `0.3` | 生成温度 |

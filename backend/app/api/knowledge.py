@@ -1,6 +1,7 @@
 """知识库管理 API"""
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from app.core.api_key import api_key_dependency
 from app.models.schemas import APIResponse
 from app.services.kb_service import (
     upload_document,
@@ -13,7 +14,7 @@ from app.services.kb_service import (
 router = APIRouter(prefix="/knowledge", tags=["知识库"])
 
 
-@router.post("/upload", response_model=APIResponse)
+@router.post("/upload", response_model=APIResponse, dependencies=[Depends(api_key_dependency)])
 async def upload(
     file: UploadFile = File(...),
     doc_type: str | None = Form(None),
@@ -49,7 +50,7 @@ async def delete_file(filename: str):
     return APIResponse(message=f"已删除 {filename}，请重建索引以更新向量库")
 
 
-@router.post("/rebuild", response_model=APIResponse)
+@router.post("/rebuild", response_model=APIResponse, dependencies=[Depends(api_key_dependency)])
 async def rebuild():
     """重建知识库索引"""
     stats = await rebuild_index()
