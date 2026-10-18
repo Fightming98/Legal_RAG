@@ -11,6 +11,11 @@ from openai import AsyncOpenAI
 
 from app.core.api_key import resolve_api_key
 from app.core.llm import get_llm
+from app.core.model_config import (
+    resolve_embedding_model,
+    resolve_llm_model,
+    resolve_rerank_model,
+)
 from app.core.retriever import get_hybrid_retriever, rrf_fuse_ranked_lists
 from app.services.reranker import simple_rerank, llm_rerank, bge_rerank
 from app.services.query_rewriter import multi_query_rewrite
@@ -75,6 +80,12 @@ class PipelineConfig:
             "use_kg": self.use_kg,
             "top_k": self.top_k,
             "collection_names": self.collection_names,
+            # 记录本次请求实际使用的模型，便于前端展示与结果回溯
+            "models": {
+                "llm": resolve_llm_model(),
+                "embedding": resolve_embedding_model(),
+                "rerank": resolve_rerank_model(),
+            },
         }
 
 
@@ -387,7 +398,7 @@ class RAGPipeline:
             timeout=settings.LLM_TIMEOUT,
         )
         request_kwargs = {
-            "model": settings.LLM_MODEL,
+            "model": resolve_llm_model(),
             "messages": messages,
             "stream": True,
             # 硅基流动 DeepSeek-V3.2 的非标准参数：开启后返回 reasoning_content

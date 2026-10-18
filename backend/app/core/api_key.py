@@ -107,7 +107,7 @@ def resolve_api_key() -> str:
         return server_key
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="缺少 SiliconFlow API Key，请先在页面「API 设置」中填入你自己的密钥。",
+        detail="缺少 SiliconFlow API Key，请先在页面「模型设置」中填入你自己的密钥。",
     )
 
 
@@ -129,7 +129,7 @@ async def api_key_dependency(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=(
                 "本站要求使用你自己的 SiliconFlow API Key。"
-                "请点击左下角「API 设置」填入密钥后再试。"
+                "请点击左下角「模型设置」填入密钥后再试。"
             ),
         )
     token = set_current_api_key(key)

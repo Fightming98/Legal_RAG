@@ -5,6 +5,16 @@ import axios from 'axios'
 const API_KEY_STORAGE = 'legal_rag.siliconflow_api_key'
 export const API_KEY_HEADER = 'X-SiliconFlow-API-Key'
 
+// 用户自定义的模型配置保存在本浏览器 localStorage，随请求头传给后端。
+// 空字符串表示使用后端 .env 中的默认模型。
+const MODEL_SETTINGS_STORAGE = 'legal_rag.model_settings'
+export const MODEL_HEADERS = {
+  llm: 'X-LLM-Model',
+  embedding: 'X-Embedding-Model',
+  rerank: 'X-Rerank-Model',
+}
+const EMPTY_MODEL_SETTINGS = { llm_model: '', embedding_model: '', rerank_model: '' }
+
 // 后端可通过 API_KEY_HEADER 环境变量自定义头名，拉到策略后动态更新
 let currentApiKeyHeader = API_KEY_HEADER
 
@@ -32,6 +42,43 @@ export function clearStoredApiKey() {
   }
 }
 
+// ===================== 模型配置（localStorage） =====================
+
+export function getStoredModelSettings() {
+  try {
+    const raw = localStorage.getItem(MODEL_SETTINGS_STORAGE)
+    if (!raw) return { ...EMPTY_MODEL_SETTINGS }
+    const parsed = JSON.parse(raw)
+    return {
+      llm_model: parsed?.llm_model || '',
+      embedding_model: parsed?.embedding_model || '',
+      rerank_model: parsed?.rerank_model || '',
+    }
+  } catch {
+    return { ...EMPTY_MODEL_SETTINGS }
+  }
+}
+
+export function saveStoredModelSettings(settings) {
+  try {
+    localStorage.setItem(MODEL_SETTINGS_STORAGE, JSON.stringify({
+      llm_model: settings?.llm_model || '',
+      embedding_model: settings?.embedding_model || '',
+      rerank_model: settings?.rerank_model || '',
+    }))
+  } catch {
+    /* 隐私模式下可能不可写，忽略即可 */
+  }
+}
+
+export function clearStoredModelSettings() {
+  try {
+    localStorage.removeItem(MODEL_SETTINGS_STORAGE)
+  } catch {
+    /* ignore */
+  }
+}
+
 // Key 脱敏展示：sk-abcd...wxyz
 export function maskApiKey(key) {
   if (!key) return ''
@@ -48,7 +95,7 @@ const api = axios.create({
   timeout: 300000,
 })
 
-// 所有请求自动携带当前浏览器保存的用户 Key
+// 所有请求自动携带当前浏览器保存的用户 Key 与模型配置
 api.interceptors.request.use((config) => {
   const key = getStoredApiKey()
   config.headers = config.headers || {}
@@ -56,10 +103,21 @@ api.interceptors.request.use((config) => {
   if (key && !config.headers[currentApiKeyHeader]) {
     config.headers[currentApiKeyHeader] = key
   }
+
+  const models = getStoredModelSettings()
+  if (models.llm_model && !config.headers[MODEL_HEADERS.llm]) {
+    config.headers[MODEL_HEADERS.llm] = models.llm_model
+  }
+  if (models.embedding_model && !config.headers[MODEL_HEADERS.embedding]) {
+    config.headers[MODEL_HEADERS.embedding] = models.embedding_model
+  }
+  if (models.rerank_model && !config.headers[MODEL_HEADERS.rerank]) {
+    config.headers[MODEL_HEADERS.rerank] = models.rerank_model
+  }
   return config
 })
 
-// 后端返回 401 时通知界面打开「API 设置」（校验 Key 的请求本身除外）
+// 后端返回 401 时通知界面打开「模型设置」（校验 Key 的请求本身除外）
 api.interceptors.response.use(
   (res) => res,
   (err) => {
@@ -87,6 +145,25 @@ export async function verifyApiKey(key) {
   const res = await api.post('/settings/verify-key', null, {
     headers: key ? { [currentApiKeyHeader]: key } : undefined,
   })
+  return res.data.data
+}
+
+// 获取当前 Key 可用的模型列表（按 LLM / 嵌入 / 重排分组）
+export async function listProviderModels(key) {
+  const res = await api.get('/settings/models', {
+    headers: key ? { [currentApiKeyHeader]: key } : undefined,
+  })
+  return res.data.data
+}
+
+// 连接测试：显式传入 Key 与三个模型，测试尚未保存的表单配置
+export async function testConnection({ key, llmModel, embeddingModel, rerankModel } = {}) {
+  const headers = {}
+  if (key) headers[currentApiKeyHeader] = key
+  if (llmModel) headers[MODEL_HEADERS.llm] = llmModel
+  if (embeddingModel) headers[MODEL_HEADERS.embedding] = embeddingModel
+  if (rerankModel) headers[MODEL_HEADERS.rerank] = rerankModel
+  const res = await api.post('/settings/test-connection', null, { headers })
   return res.data.data
 }
 
@@ -161,6 +238,11 @@ export async function streamChat(params, { onEvent, signal } = {}) {
   const headers = { 'Content-Type': 'application/json' }
   if (key) headers[currentApiKeyHeader] = key
 
+  const models = getStoredModelSettings()
+  if (models.llm_model) headers[MODEL_HEADERS.llm] = models.llm_model
+  if (models.embedding_model) headers[MODEL_HEADERS.embedding] = models.embedding_model
+  if (models.rerank_model) headers[MODEL_HEADERS.rerank] = models.rerank_model
+
   const response = await fetch('/api/chat/stream', {
     method: 'POST',
     headers,
@@ -168,7 +250,7 @@ export async function streamChat(params, { onEvent, signal } = {}) {
     signal,
   })
 
-  // fetch 不走 axios 拦截器，这里复刻 401 → 打开 API 设置的行为
+  // fetch 不走 axios 拦截器，这里复刻 401 → 打开模型设置的行为
   if (!response.ok) {
     let detail = `请求失败 (${response.status})`
     try {

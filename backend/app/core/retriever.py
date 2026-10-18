@@ -16,6 +16,13 @@ from app.config import settings
 logger = get_logger(__name__)
 
 
+def _is_dimension_mismatch(exc: Exception) -> bool:
+    """判断异常是否由「嵌入模型维度与集合维度不一致」引起"""
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return "dimension" in name or "dimension" in text or "dimensionality" in text
+
+
 class BM25ChineseRetriever(BaseRetriever):
     """基于 jieba 分词的 BM25 中文检索器"""
 
@@ -136,7 +143,15 @@ class HybridRetriever(BaseRetriever):
                         results_map[key]["score"] += score
                     else:
                         results_map[key] = {"doc": doc, "score": score}
-            except Exception:
+            except Exception as exc:
+                if _is_dimension_mismatch(exc):
+                    # 用户切换嵌入模型后维度可能与旧索引不一致；静默跳过会让
+                    # 检索退化成纯 BM25，这里直接抛出可读错误引导用户处理。
+                    raise RuntimeError(
+                        "当前嵌入模型与知识库索引的向量维度不一致。"
+                        "请在「模型设置」中恢复默认嵌入模型（BAAI/bge-m3），"
+                        "或使用当前嵌入模型重建知识库索引。"
+                    ) from exc
                 logger.warning("向量检索集合 %s 失败，已跳过该集合", name, exc_info=True)
                 continue
 
@@ -176,7 +191,13 @@ class HybridRetriever(BaseRetriever):
                         results_map[key]["score"] += score
                     else:
                         results_map[key] = {"doc": doc, "score": score}
-            except Exception:
+            except Exception as exc:
+                if _is_dimension_mismatch(exc):
+                    raise RuntimeError(
+                        "当前嵌入模型与知识库索引的向量维度不一致。"
+                        "请在「模型设置」中恢复默认嵌入模型（BAAI/bge-m3），"
+                        "或使用当前嵌入模型重建知识库索引。"
+                    ) from exc
                 logger.warning("分离式向量检索集合 %s 失败，已跳过该集合", name, exc_info=True)
                 continue
 

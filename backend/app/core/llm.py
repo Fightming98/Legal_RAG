@@ -15,6 +15,7 @@ from langchain_openai import ChatOpenAI
 
 from app.config import settings
 from app.core.api_key import resolve_api_key
+from app.core.model_config import resolve_llm_model
 
 _MAX_CACHE_ENTRIES = 64  # 最多缓存 64 个客户端，超出后淘汰最久未用条目
 
@@ -33,7 +34,7 @@ def get_llm(
 ) -> ChatOpenAI:
     """获取当前请求上下文对应 Key 的 LLM 客户端"""
     api_key = resolve_api_key()  # 当前请求的 Key（无请求上下文时回退服务端 .env）
-    _model = model or settings.LLM_MODEL  # 未指定则使用配置默认模型
+    _model = model or resolve_llm_model()  # 未指定则使用请求头选择的模型 / 配置默认模型
     _temp = temperature if temperature is not None else settings.LLM_TEMPERATURE  # 未指定则使用配置默认温度
     cache_key = (_key_id(api_key), _model, _temp)  # 组合成缓存键
 

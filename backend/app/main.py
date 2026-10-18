@@ -1,12 +1,13 @@
 """FastAPI 应用入口"""
 
 import openai
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
 from app.api import chat, knowledge, performance
 from app.api import settings as settings_api
+from app.core.model_config import model_config_dependency
 
 app = FastAPI(
     title="法律 RAG 系统",
@@ -26,9 +27,23 @@ app.add_middleware(
 )
 
 # 注册路由
-app.include_router(chat.router, prefix=settings.API_PREFIX)
-app.include_router(knowledge.router, prefix=settings.API_PREFIX)
-app.include_router(performance.router, prefix=settings.API_PREFIX)
+# 所有消耗模型的业务接口都挂载 model_config_dependency：
+# 用户可在「模型设置」页通过请求头选择 LLM / 嵌入 / 重排序模型。
+app.include_router(
+    chat.router,
+    prefix=settings.API_PREFIX,
+    dependencies=[Depends(model_config_dependency)],
+)
+app.include_router(
+    knowledge.router,
+    prefix=settings.API_PREFIX,
+    dependencies=[Depends(model_config_dependency)],
+)
+app.include_router(
+    performance.router,
+    prefix=settings.API_PREFIX,
+    dependencies=[Depends(model_config_dependency)],
+)
 app.include_router(settings_api.router, prefix=settings.API_PREFIX)
 
 
@@ -41,7 +56,7 @@ async def handle_authentication_error(request: Request, exc: openai.Authenticati
     """Key 无效 / 被禁用"""
     return JSONResponse(
         status_code=401,
-        content={"detail": "SiliconFlow API Key 无效或已过期，请在左下角「API 设置」中重新配置。"},
+        content={"detail": "SiliconFlow API Key 无效或已过期，请在左下角「模型设置」中重新配置。"},
     )
 
 
@@ -89,6 +104,7 @@ async def health_check():
         "models": {
             "llm": settings.LLM_MODEL,
             "embedding": settings.EMBEDDING_MODEL,
+            "rerank": settings.RERANK_MODEL,
         },
         "provider": provider,
         "knowledge_base": stats,

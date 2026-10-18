@@ -19,7 +19,7 @@ from app.services.report_service import (
 router = APIRouter(prefix="/chat", tags=["问答"])
 
 # 流式响应开始后 HTTP 状态码无法再修改，异常统一通过 error 事件下发
-_KEY_INVALID_MSG = "SiliconFlow API Key 无效或已过期，请在左下角「API 设置」中重新配置。"
+_KEY_INVALID_MSG = "SiliconFlow API Key 无效或已过期，请在左下角「模型设置」中重新配置。"
 _RATE_LIMIT_MSG = "硅基流动额度不足或请求过于频繁，请检查你账户的余额后重试。"
 _CONNECTION_MSG = "服务器无法连接硅基流动服务，请稍后重试。"
 

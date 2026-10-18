@@ -45,6 +45,7 @@
 - **混合检索**：BM25（jieba 分词）稀疏检索 + BGE-M3 稠密向量检索 + 多路召回 RRF 融合，兼顾关键词精确匹配与语义召回
 - **知识图谱增强**：内置 455+ 罪名犯罪知识图谱（定义 / 构成要件 / 量刑标准 / 相关法条），精确匹配并入检索结果
 - **前后端分离**：FastAPI 异步后端 + React（Vite）单页前端
+- **模型设置页**：API Key 配置、连接测试、模型列表拉取、LLM / Embedding / Rerank 模型自定义一体化，配置保存在浏览器并通过请求头随请求下发
 - **性能与质量评估**：内置 CPU / 内存实时监控、各阶段延迟分解、ROUGE / 忠实度 / 相关性自动评估
 - **多源数据整合**：整合 6 个开源法律数据集，导入约 59,000 个文本分块
 
@@ -59,7 +60,10 @@
 │   │ 智能问答    │   │ 知识库管理   │   │ 性能监控       │              │
 │   │ 策略配置    │   │ 上传 / 重建  │   │ 基准测试 / 报告 │              │
 │   └─────┬─────┘   └─────┬──────┘   └──────┬───────┘              │
-│         └────────────────┼────────────────┘                       │
+│         │               │                 │                       │
+│   ┌─────┴───────────────┴─────────────────┴───────┐              │
+│   │ 模型设置：API Key / 连接测试 / 模型列表 / 模型选择 │              │
+│   └──────────────────────┬────────────────────────┘              │
 │                          │ HTTP / REST API                        │
 ├──────────────────────────┼────────────────────────────────────────┤
 │                   Backend (FastAPI)                               │
@@ -73,7 +77,7 @@
 │  │   + Stage 2.5 犯罪知识图谱 (可选, 并行)                     │  │
 │  │              ↓                                             │  │
 │  │  Stage 3 重排序                                             │  │
-│  │   [无 | 简单重排 (Jaccard+元数据) | LLM 重排]               │  │
+│  │   [无 | BGE 精排 | 简单重排 (Jaccard+元数据) | LLM 重排]     │  │
 │  │              ↓                                             │  │
 │  │  Stage 4 生成                                               │  │
 │  │   [标准 | 链式推理 CoT | 自我反思修正 | 结构化法律回答]       │  │
@@ -173,9 +177,10 @@ Legal_rag/
 │   │   │   ├── chat.py                # /api/chat — 问答（含流式 SSE）、记录
 │   │   │   ├── knowledge.py           # /api/knowledge/* — 知识库管理
 │   │   │   ├── performance.py         # /api/performance/* — 性能监控与报告
-│   │   │   └── settings.py            # /api/settings/* — 密钥策略与 Key 校验
+│   │   │   └── settings.py            # /api/settings/* — 密钥策略、Key 校验、模型列表、连接测试
 │   │   ├── core/                      # 核心组件
 │   │   │   ├── api_key.py             # 请求级用户 API Key 上下文（ContextVar）
+│   │   │   ├── model_config.py        # 请求级模型覆盖（请求头解析、默认值回退、模型分类）
 │   │   │   ├── llm.py                 # DeepSeek-V3.2 初始化（ChatOpenAI → 硅基流动）
 │   │   │   ├── embeddings.py          # BGE-M3 初始化（按请求动态解析 Key 的代理）
 │   │   │   ├── vectorstore.py         # ChromaDB 向量数据库（带实例缓存）
@@ -222,6 +227,7 @@ Legal_rag/
 │       ├── test_advanced_retrieval.py # 术语规范化、上下文标头
 │       ├── test_kg.py                 # 犯罪知识图谱模块
 │       ├── test_api_key.py            # 用户自带 Key：校验、上下文、401 行为
+│       ├── test_model_config.py       # 请求级模型覆盖：默认值、请求头校验、模型分类
 │       └── test_queries.txt           # 测试问题集
 │
 └── frontend/
@@ -230,13 +236,14 @@ Legal_rag/
     ├── index.html                     # HTML 入口
     └── src/
         ├── main.jsx                   # React 挂载入口
-        ├── App.jsx                    # 根组件（侧边栏导航 + 页面切换 + Key 设置入口）
+        ├── App.jsx                    # 根组件（侧边栏导航 + 页面切换 + 模型设置入口）
         ├── components/
         │   └── ApiKeySettings.jsx     # 用户 API Key 设置弹窗（校验 + 本地保存）
         ├── pages/
         │   ├── ChatPage.jsx           # 智能问答页面（管线策略配置面板）
         │   ├── KnowledgePage.jsx      # 知识库管理页面
-        │   └── PerformancePage.jsx    # 性能监控页面
+        │   ├── PerformancePage.jsx    # 性能监控页面
+        │   └── ModelSettingsPage.jsx  # 模型设置页（Key / 连接测试 / 模型列表 / 模型自定义）
         ├── services/
         │   └── api.js                 # Axios API 封装
         └── styles/
@@ -258,7 +265,7 @@ cd Legal_rag
 
 本项目模型由硅基流动（SiliconFlow）云端 API 提供，**无需本地部署模型**。支持两种密钥模式：
 
-- **用户自带 Key（默认，推荐公网部署）**：每个访客在页面左下角「API 设置」中填入自己的 Key，密钥只保存在其浏览器 `localStorage`，随请求通过 `X-SiliconFlow-API-Key` 请求头传给后端。未配置的访客无法使用问答、上传、重建索引和性能测试。服务端 `backend/.env` 中的 Key 仅为脚本和健康检查兜底，**不会被普通请求使用**。
+- **用户自带 Key（默认，推荐公网部署）**：每个访客在侧边栏「模型设置」中填入自己的 Key，密钥只保存在其浏览器 `localStorage`，随请求通过 `X-SiliconFlow-API-Key` 请求头传给后端。未配置的访客无法使用问答、上传、重建索引和性能测试。服务端 `backend/.env` 中的 Key 仅为脚本和健康检查兜底，**不会被普通请求使用**。该页面同时提供连接测试、模型列表拉取，以及对 LLM / Embedding / Rerank 模型的自定义配置。
 - **服务端统一 Key（本地开发/内网）**：设置 `REQUIRE_USER_API_KEY=false`，未携带 Key 的请求回退使用服务端 `.env` 中的 Key。
 
 本地开发可直接使用服务端 Key（跳过页面配置）：
@@ -280,6 +287,9 @@ REQUIRE_USER_API_KEY=false     # 本地开发回退到服务端 Key；公网部�
 使用的默认模型：
 - 生成：`deepseek-ai/DeepSeek-V3.2`
 - Embedding：`BAAI/bge-m3`
+- 重排序：`BAAI/bge-reranker-v2-m3`
+
+以上默认值可在前端「模型设置」页按浏览器自定义，无需改动服务端配置。
 
 > **注意**：`config.py` 按进程工作目录读取 `.env`，因此在 `backend/` 目录下启动时，`.env` 需放在 `backend/` 内。
 
@@ -304,6 +314,8 @@ npm run dev
 ```
 
 访问 `http://localhost:5173`（Vite 开发服务器已将 `/api/*` 代理到 `http://localhost:8000`）。
+
+首次使用建议进入侧边栏「模型设置」：填写 SiliconFlow API Key → 点击「连接测试」确认 Key 与三个模型均可用 → 点击「获取模型列表」选择或手动输入模型 → 点击「保存设置」。配置只保存在当前浏览器，后续问答、知识库与性能测试请求会自动携带。
 
 ### 5. 准备数据与导入（首次使用）
 
@@ -342,18 +354,67 @@ pytest tests/ -v
 >
 > 未携带返回 `401`，Key 无效返回 `401`，额度不足/限流返回 `429`，无法连接硅基流动返回 `502`。只读列表、下载、健康检查接口不需要 Key。
 
-### 密钥设置
+**请求级模型覆盖**（可选，前端「模型设置」会自动携带）：在任意消耗模型的接口上附加以下请求头，即可只让本次请求使用自定义模型；不传则回退 `.env` 中的默认值：
+
+| 请求头 | 覆盖的模型 | 默认值 |
+|--------|-----------|--------|
+| `X-LLM-Model` | 生成 / 查询改写 / 质量评估 | `deepseek-ai/DeepSeek-V3.2` |
+| `X-Embedding-Model` | 向量检索与知识库索引 | `BAAI/bge-m3` |
+| `X-Rerank-Model` | BGE 重排序 | `BAAI/bge-reranker-v2-m3` |
+
+> 模型名只允许字母、数字及 `. _ : / @ + -`，非法值返回 `422`。更换 Embedding 模型时，其向量维度必须与现有 ChromaDB 索引一致（BGE-M3 为 1024 维），否则检索阶段会提示维度不匹配，需恢复默认模型或重建索引。
+
+### 密钥与模型设置
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/settings/key-policy` | 公开的密钥策略（是否强制用户自带 Key、请求头名称等，不含密钥内容） |
+| GET | `/api/settings/key-policy` | 公开的密钥策略（是否强制用户自带 Key、请求头名称，及 LLM / Embedding / Rerank 默认模型，不含密钥内容） |
 | POST | `/api/settings/verify-key` | 用请求头中的 Key 调用硅基流动 `/models` 校验，返回脱敏 Key 与可用模型数 |
+| GET | `/api/settings/models` | 用请求头中的 Key 拉取硅基流动模型列表，并按 `llm` / `embedding` / `rerank` / `other` 分组返回 |
+| POST | `/api/settings/test-connection` | 依次测试 API Key、LLM、Embedding、Rerank 四项连通性，返回每项的成功状态、耗时与细节；失败项附带 `status_code`、`error_type`（网络异常时）及硅基流动原始报错文本 |
+
+**GET `/api/settings/models` 响应（节选）**：
+
+```json
+{
+  "models": [ { "id": "BAAI/bge-m3", "category": "embedding" } ],
+  "groups": {
+    "llm": ["deepseek-ai/DeepSeek-V3.2"],
+    "embedding": ["BAAI/bge-m3"],
+    "rerank": ["BAAI/bge-reranker-v2-m3"],
+    "other": []
+  },
+  "count": 99,
+  "latency_ms": 620,
+  "defaults": {
+    "llm_model": "deepseek-ai/DeepSeek-V3.2",
+    "embedding_model": "BAAI/bge-m3",
+    "rerank_model": "BAAI/bge-reranker-v2-m3"
+  }
+}
+```
+
+**POST `/api/settings/test-connection` 响应（节选）**：
+
+```json
+{
+  "ok": true,
+  "checks": [
+    { "key": "key", "label": "API Key", "ok": true, "latency_ms": 610, "detail": "连接成功，共 99 个模型" },
+    { "key": "llm", "model": "deepseek-ai/DeepSeek-V3.2", "ok": true, "latency_ms": 810, "detail": "模型响应正常" },
+    { "key": "embedding", "model": "BAAI/bge-m3", "ok": true, "latency_ms": 420, "dimensions": 1024, "detail": "向量维度 1024" },
+    { "key": "rerank", "model": "BAAI/bge-reranker-v2-m3", "ok": true, "latency_ms": 380, "score": 0.318, "detail": "相关性分数 0.318" }
+  ]
+}
+```
+
+Key 校验失败时，后三项返回 `"skipped": true`；任一模型测试失败时 `ok` 为 `false`，前端会逐项展示失败原因。失败项的 `detail` 保留硅基流动原始报错（如 `HTTP 400（请求参数或模型名称不被支持）: Model does not exist. Please check it carefully.`），并在结果区以红色等宽字体展示；若测试请求本身失败（网络不可达、401、422、502），结果区同样会显示 HTTP 状态码与后端返回的 `detail`。
 
 ### 健康检查
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/health` | 服务健康状态、模型配置、硅基流动 provider 状态、知识库统计（`provider.status` 可能为 `not_configured`：服务端未配置兜底 Key） |
+| GET | `/health` | 服务健康状态、模型配置（`provider.models.llm` / `embedding` / `rerank`）、硅基流动 provider 状态、知识库统计（`provider.status` 可能为 `not_configured`：服务端未配置兜底 Key） |
 
 ### 问答
 
@@ -483,6 +544,8 @@ pytest tests/ -v
 | `DEFAULT_RERANK` | `bge` | 默认重排序策略 |
 | `DEFAULT_GENERATION` | `standard` | 默认生成策略 |
 
+> `LLM_MODEL` / `EMBEDDING_MODEL` / `RERANK_MODEL` 是服务端默认值，前端「模型设置」保存的自定义模型会通过 `X-LLM-Model` / `X-Embedding-Model` / `X-Rerank-Model` 请求头按请求覆盖，不会修改服务端配置。
+
 ---
 
 ## 数据源与导入
@@ -518,7 +581,7 @@ python -m scripts.import_data        # 分块并写入 ChromaDB
 
 ## 测试
 
-系统包含 24 个单元测试用例，分布在 4 个测试文件中：
+单元测试分布在 6 个测试文件中：
 
 | 测试文件 | 覆盖范围 |
 |---------|---------|
@@ -526,6 +589,8 @@ python -m scripts.import_data        # 分块并写入 ChromaDB
 | `test_pipeline.py` | PipelineConfig 默认值、策略枚举、向后兼容映射 |
 | `test_advanced_retrieval.py` | 法律术语规范化、上下文标头注入 |
 | `test_kg.py` | 知识图谱加载、罪名查找 |
+| `test_api_key.py` | 用户自带 Key：校验、上下文、401 行为 |
+| `test_model_config.py` | 请求级模型覆盖：默认值回退、请求头校验、模型分类 |
 
 ```bash
 cd backend && pytest tests/ -v

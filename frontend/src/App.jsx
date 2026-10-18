@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { MessageSquare, Database, Activity, KeyRound } from 'lucide-react'
+import { MessageSquare, Database, Activity, KeyRound, Settings } from 'lucide-react'
 import ChatPage from './pages/ChatPage'
 import KnowledgePage from './pages/KnowledgePage'
 import PerformancePage from './pages/PerformancePage'
+import ModelSettingsPage from './pages/ModelSettingsPage'
 import ApiKeySettings from './components/ApiKeySettings'
 import {
   getKeyPolicy,
@@ -16,6 +17,7 @@ const NAV_ITEMS = [
   { key: 'chat', label: '智能问答', icon: MessageSquare },
   { key: 'knowledge', label: '知识库管理', icon: Database },
   { key: 'performance', label: '性能监控', icon: Activity },
+  { key: 'models', label: '模型设置', icon: Settings },
 ]
 
 export default function App() {
@@ -92,8 +94,8 @@ export default function App() {
         <div className="sidebar-footer">
           <button
             className="api-key-btn"
-            onClick={() => setSettingsOpen(true)}
-            title="配置你自己的 SiliconFlow API Key"
+            onClick={() => setPage('models')}
+            title="配置 API Key 与模型"
           >
             <KeyRound size={14} />
             <span className="api-key-btn-label">
@@ -117,6 +119,15 @@ export default function App() {
         </div>
         <div style={{ display: page === 'performance' ? 'block' : 'none' }}>
           <PerformancePage />
+        </div>
+        <div style={{ display: page === 'models' ? 'block' : 'none' }}>
+          <ModelSettingsPage
+            apiKey={apiKey}
+            keyPolicy={keyPolicy}
+            active={page === 'models'}
+            onApiKeySaved={handleSaved}
+            onApiKeyCleared={handleCleared}
+          />
         </div>
       </main>
 

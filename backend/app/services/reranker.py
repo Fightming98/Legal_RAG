@@ -16,6 +16,7 @@ from langchain_core.documents import Document
 from app.config import settings
 from app.core.api_key import resolve_api_key
 from app.core.llm import get_llm
+from app.core.model_config import resolve_rerank_model
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -144,7 +145,7 @@ async def _siliconflow_rerank(
     api_key = resolve_api_key()  # 当前用户自己的 Key
     url = f"{settings.SILICONFLOW_BASE_URL.rstrip('/')}/rerank"
     payload = {
-        "model": settings.RERANK_MODEL,
+        "model": resolve_rerank_model(),
         "query": query,
         # 过长文档截断，避免超出 reranker 的上下文窗口
         "documents": [doc.page_content[: settings.RERANK_DOC_MAX_CHARS] for doc in documents],

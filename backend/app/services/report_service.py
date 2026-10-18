@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from app.config import settings
 from app.core.logging import get_logger
+from app.core.model_config import resolve_embedding_model, resolve_llm_model
 from app.models.schemas import (
     BenchmarkResultV2,
     ReportMeta,
@@ -42,8 +43,8 @@ def generate_report(benchmark: BenchmarkResultV2) -> ReportFull:
 
     # 轻量化亮点
     highlights = {
-        "model": settings.LLM_MODEL,
-        "embedding": settings.EMBEDDING_MODEL,
+        "model": resolve_llm_model(),
+        "embedding": resolve_embedding_model(),
         "vector_db": "ChromaDB (嵌入式)",
         "deployment": "全本地部署，无需云端 API",
         "avg_latency_ms": benchmark.avg_latency_ms,
