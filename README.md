@@ -165,7 +165,7 @@ Legal_rag/
 │   │   ├── main.py                    # FastAPI 应用入口（含 /health 健康检查）
 │   │   ├── config.py                  # 全局配置（pydantic-settings，读取 .env）
 │   │   ├── api/                       # HTTP API 路由层
-│   │   │   ├── chat.py                # /api/chat — 问答、记录
+│   │   │   ├── chat.py                # /api/chat — 问答（含流式 SSE）、记录
 │   │   │   ├── knowledge.py           # /api/knowledge/* — 知识库管理
 │   │   │   ├── performance.py         # /api/performance/* — 性能监控与报告
 │   │   │   └── settings.py            # /api/settings/* — 密钥策略与 Key 校验
@@ -183,6 +183,7 @@ Legal_rag/
 │   │   │   ├── self_reflect.py        # 自我反思与修正
 │   │   │   ├── kg_service.py          # 犯罪知识图谱加载、实体提取与查找
 │   │   │   ├── rag_service.py         # RAG 入口（向后兼容包装器）
+│   │   │   ├── stream_service.py      # 流式 RAG 事件流（思考/回答/来源/指标）
 │   │   │   ├── kb_service.py          # 知识库管理（上传/列表/删除/重建）
 │   │   │   ├── reranker.py            # 重排序（Jaccard + 元数据 / LLM 批量评分）
 │   │   │   ├── query_rewriter.py      # 查询重写 + 术语规范化 + 查询分解
@@ -353,7 +354,8 @@ pytest tests/ -v
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/chat` | RAG 智能问答 |
+| POST | `/api/chat` | RAG 智能问答（一次性返回完整结果） |
+| POST | `/api/chat/stream` | RAG 流式问答（SSE：思考过程 + 回答正文增量） |
 | POST | `/api/chat/save-record` | 保存一次问答性能记录 |
 | GET | `/api/chat/records` | 列出问答性能记录 |
 | GET | `/api/chat/records/{record_id}` | 下载问答性能记录 JSON |
@@ -385,6 +387,7 @@ pytest tests/ -v
 | `top_k` | 1-20 | `5` | 最终返回文档数 |
 | `evaluate_quality` | `true` / `false` | `false` | 是否评估回答质量 |
 | `monitor_system` | `true` / `false` | `false` | 是否采集系统资源快照 |
+| `enable_thinking` | `true` / `false` | `true` | 是否开启 DeepSeek 思考模式（开启后流式接口返回 `reasoning_content`，思考过程可在前端折叠展开） |
 
 **响应（节选）**：
 
@@ -407,6 +410,24 @@ pytest tests/ -v
   "pipeline_config": { ... }
 }
 ```
+
+**POST `/api/chat/stream`（SSE）**：
+
+请求体与 `/api/chat` 相同，响应为 `text/event-stream`，前端逐事件更新界面：
+
+| 事件 | 数据 | 说明 |
+|------|------|------|
+| `stage` | `{ "stage": "...", "message": "..." }` | 管线阶段提示（检索 / 生成 / 反思 / 质量评估） |
+| `sources` | `{ "sources": [...], "rewritten_queries": ..., "kg_entities": ..., "metrics": ... }` | 检索完成，返回来源与检索耗时 |
+| `reasoning` | `{ "delta": "..." }` | 模型思考内容增量（siliconflow `reasoning_content`） |
+| `answer` | `{ "delta": "..." }` | 回答正文增量 |
+| `answer_replace` | `{ "answer": "...", "was_corrected": true }` | 自我反思修正后的完整回答（替换此前流式内容） |
+| `metrics` | `{ ... }` | 最终阶段耗时 |
+| `quality` | `{ ... }` | 质量评估结果（开启时） |
+| `done` | `{ "generation_strategy": ..., "system_before": ..., "system_after": ... }` | 流结束元数据 |
+| `error` | `{ "detail": "...", "status": 401 }` | 流内异常（开始推流后 HTTP 状态码无法再修改） |
+
+前端「深度思考」开关控制是否开启思考模式；思考内容默认折叠，点击回答上方的「思考过程」标题手动展开。
 
 ### 知识库管理
 

@@ -1,11 +1,14 @@
 """问答 API"""
 
+import json
+
 import openai
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from app.core.api_key import api_key_dependency
 from app.models.schemas import ChatRequest, ChatResponse, APIResponse
 from app.services.rag_service import rag_query
+from app.services.stream_service import stream_rag_query
 from app.services.perf_service import get_system_info
 from app.services.report_service import (
     save_chat_record,
@@ -14,6 +17,16 @@ from app.services.report_service import (
 )
 
 router = APIRouter(prefix="/chat", tags=["问答"])
+
+# 流式响应开始后 HTTP 状态码无法再修改，异常统一通过 error 事件下发
+_KEY_INVALID_MSG = "SiliconFlow API Key 无效或已过期，请在左下角「API 设置」中重新配置。"
+_RATE_LIMIT_MSG = "硅基流动额度不足或请求过于频繁，请检查你账户的余额后重试。"
+_CONNECTION_MSG = "服务器无法连接硅基流动服务，请稍后重试。"
+
+
+def _sse(event: str, data: dict) -> str:
+    """格式化为 SSE 帧（JSON 数据中的换行已被转义，不会截断事件）"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 @router.post("", response_model=APIResponse, dependencies=[Depends(api_key_dependency)])
@@ -64,6 +77,49 @@ async def chat(req: ChatRequest):
         raise  # 交给 main.py 的全局处理器转成 401 / 429 / 502
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"问答服务异常: {e}")
+
+
+@router.post("/stream", dependencies=[Depends(api_key_dependency)])
+async def chat_stream(req: ChatRequest):
+    """流式 RAG 问答（SSE）：分别推送思考过程、回答正文与检索来源"""
+    async def event_stream():
+        try:
+            async for event, data in stream_rag_query(
+                question=req.question,
+                use_rerank=req.use_rerank,
+                use_query_rewrite=req.use_query_rewrite,
+                top_k=req.top_k,
+                collection=req.collection,
+                query_transform=req.query_transform,
+                rerank_strategy=req.rerank_strategy,
+                generation_strategy=req.generation_strategy,
+                use_kg=req.use_kg,
+                enable_thinking=req.enable_thinking,
+                monitor_system=req.monitor_system,
+                evaluate_quality=req.evaluate_quality,
+            ):
+                yield _sse(event, data)
+        except HTTPException as exc:
+            # 依赖已完成校验；此处主要兜底生成阶段抛出的语义化异常
+            yield _sse("error", {"detail": exc.detail, "status": exc.status_code})
+        except openai.AuthenticationError:
+            yield _sse("error", {"detail": _KEY_INVALID_MSG, "status": 401})
+        except openai.RateLimitError:
+            yield _sse("error", {"detail": _RATE_LIMIT_MSG, "status": 429})
+        except openai.APIConnectionError:
+            yield _sse("error", {"detail": _CONNECTION_MSG, "status": 502})
+        except Exception as e:
+            yield _sse("error", {"detail": f"问答服务异常: {e}", "status": 500})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",  # 禁止中间层缓存
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # 关闭 Nginx 等反向代理的缓冲
+        },
+    )
 
 
 @router.post("/save-record", response_model=APIResponse)

@@ -38,6 +38,11 @@ export function maskApiKey(key) {
   return key.length > 12 ? `${key.slice(0, 6)}...${key.slice(-4)}` : 'sk-****'
 }
 
+// 后端可能通过 /settings/key-policy 下发自定义请求头名
+export function getApiKeyHeader() {
+  return currentApiKeyHeader
+}
+
 const api = axios.create({
   baseURL: '/api',
   timeout: 300000,
@@ -87,7 +92,7 @@ export async function verifyApiKey(key) {
 
 // ===================== 问答 =====================
 
-export async function sendChat({
+function buildChatPayload({
   question,
   useRerank = true,
   useQueryRewrite = false,
@@ -99,8 +104,9 @@ export async function sendChat({
   rerankStrategy = 'simple',
   generationStrategy = 'standard',
   useKg = false,
+  enableThinking = true,
 }) {
-  const res = await api.post('/chat', {
+  return {
     question,
     use_rerank: useRerank,
     use_query_rewrite: useQueryRewrite,
@@ -112,8 +118,99 @@ export async function sendChat({
     rerank_strategy: rerankStrategy,
     generation_strategy: generationStrategy,
     use_kg: useKg,
-  })
+    enable_thinking: enableThinking,
+  }
+}
+
+export async function sendChat(params) {
+  const res = await api.post('/chat', buildChatPayload(params))
   return res.data.data
+}
+
+// 解析单个 SSE 事件块（event: xxx\ndata: {...}）
+function parseSSEBlock(raw) {
+  let event = 'message'
+  const dataLines = []
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim()
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).replace(/^ /, ''))
+    }
+  }
+  if (!dataLines.length) return null
+  const text = dataLines.join('\n')
+  let data = text
+  try {
+    data = JSON.parse(text)
+  } catch {
+    /* 非 JSON 数据保留原始文本 */
+  }
+  return { event, data }
+}
+
+/**
+ * 流式问答：通过 SSE 逐事件回调
+ *
+ * onEvent 收到 { event, data }，事件类型见后端 stream_service：
+ * stage / sources / reasoning / answer / answer_replace / metrics / quality /
+ * done / error。
+ */
+export async function streamChat(params, { onEvent, signal } = {}) {
+  const key = getStoredApiKey()
+  const headers = { 'Content-Type': 'application/json' }
+  if (key) headers[currentApiKeyHeader] = key
+
+  const response = await fetch('/api/chat/stream', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(buildChatPayload(params)),
+    signal,
+  })
+
+  // fetch 不走 axios 拦截器，这里复刻 401 → 打开 API 设置的行为
+  if (!response.ok) {
+    let detail = `请求失败 (${response.status})`
+    try {
+      const body = await response.json()
+      detail = body?.detail || detail
+    } catch {
+      /* 响应体不是 JSON 时沿用默认提示 */
+    }
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent('legal-rag:api-key-required', { detail }))
+    }
+    const err = new Error(detail)
+    err.status = response.status
+    throw err
+  }
+  if (!response.body) throw new Error('当前浏览器不支持流式响应')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+
+  const emitBlock = (raw) => {
+    const parsed = parseSSEBlock(raw)
+    if (parsed) onEvent?.(parsed)
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    // 统一换行符；跨 chunk 的 \r\n 会在后续拼接后修正
+    buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n')
+    let sep
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const raw = buffer.slice(0, sep)
+      buffer = buffer.slice(sep + 2)
+      if (raw.trim()) emitBlock(raw)
+    }
+  }
+
+  // 处理末尾没有空行结尾的残留事件
+  buffer = (buffer + decoder.decode()).replace(/\r\n/g, '\n')
+  if (buffer.trim()) emitBlock(buffer)
 }
 
 // ===================== 知识库 =====================

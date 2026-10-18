@@ -245,6 +245,127 @@ textarea.input {
   flex: 1;
 }
 
+/* ===================== 思考过程 ===================== */
+
+.thinking-panel {
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--border-light);
+  overflow: hidden;
+}
+
+.thinking-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thinking-header:hover:not(:disabled) {
+  color: var(--primary);
+}
+
+.thinking-header:disabled {
+  cursor: default;
+}
+
+.thinking-label {
+  font-weight: 500;
+}
+
+.thinking-state {
+  margin-left: auto;
+  margin-right: 4px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.thinking-panel.is-streaming .thinking-state {
+  color: var(--primary);
+  opacity: 1;
+}
+
+.thinking-body {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 8px 12px 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.thinking-stages {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.thinking-stages li {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+
+.thinking-stages li::before {
+  content: '·';
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.thinking-reasoning {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.thinking-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.thinking-status .spinner {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+.stream-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 2px;
+  border-radius: 1px;
+  background: var(--primary);
+  vertical-align: -2px;
+  animation: cursor-blink 1s step-end infinite;
+}
+
+@keyframes cursor-blink {
+  50% { opacity: 0; }
+}
+
+.stream-error {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.08);
+  color: #dc2626;
+  font-size: 12px;
+}
+
 /* ===================== 来源卡片 ===================== */
 
 .sources-section {

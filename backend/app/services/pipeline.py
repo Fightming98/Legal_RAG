@@ -1,11 +1,15 @@
 """RAG 可插拔管线 — 编排查询变换、检索、重排序、生成等阶段"""
 
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
 from langchain_core.documents import Document
+from langchain_core.messages import convert_to_openai_messages
+from openai import AsyncOpenAI
 
+from app.core.api_key import resolve_api_key
 from app.core.llm import get_llm
 from app.core.retriever import get_hybrid_retriever
 from app.services.reranker import simple_rerank, llm_rerank
@@ -73,6 +77,16 @@ class PipelineConfig:
         }
 
 
+@dataclass
+class PreparedContext:
+    """检索侧管线（Stage 1-3）的产物，供生成 / 流式生成阶段复用"""
+    context: str  # 拼装后的参考资料文本
+    docs: list[Document]  # 重排后的文档
+    sources: list[SourceDocument]  # 返回给前端的来源摘要
+    kg_entities: list[str]  # KG 命中的罪名实体
+    rewritten_queries: list[str] | None  # 查询变换结果
+
+
 # ===================== RAG 管线 =====================
 
 class RAGPipeline:
@@ -98,6 +112,32 @@ class RAGPipeline:
         """执行完整 RAG 管线：查询变换 → 检索 → KG → 重排 → 生成"""
         total_start = time.time()  # 端到端计时起点
 
+        # Stage 1-3: 查询变换 / 检索 / KG / 重排
+        prepared = await self.prepare(question)
+
+        # Stage 4: 生成（选择生成策略并调用 LLM 产出答案）
+        answer, was_corrected = await self._generate(question, prepared.docs, prepared.context)
+        self.metrics["was_corrected"] = was_corrected
+        self.metrics["llm_calls"] += 1  # 生成至少 1 次
+        if was_corrected:
+            self.metrics["llm_calls"] += 2  # 反思验证 + 修正
+
+        # 总耗时
+        self.metrics["total_ms"] = round((time.time() - total_start) * 1000, 1)
+
+        # 组装最终响应
+        return ChatResponse(
+            answer=answer,
+            sources=prepared.sources,
+            metrics=StageMetrics(**self.metrics),
+            rewritten_queries=prepared.rewritten_queries,  # 重写/分解后的查询（供前端展示）
+            kg_entities=prepared.kg_entities or None,  # KG 实体（无则返回 None）
+            generation_strategy=self.config.generation_strategy.value,
+            pipeline_config=self.config.to_dict(),
+        )
+
+    async def prepare(self, question: str) -> PreparedContext:
+        """执行检索侧管线（Stage 1-3），返回生成阶段所需的上下文"""
         # Stage 1: 查询变换（可选，按配置生成多个检索查询 / HyDE 文档）
         search_queries, hyde_doc, rewritten_queries = await self._query_transform(question)
         self.metrics["llm_calls"] += self._count_transform_calls()  # 计入查询变换阶段的 LLM 调用
@@ -127,34 +167,22 @@ class RAGPipeline:
             # 批量重排序节省 N-1 次调用（相比逐文档评分）
             self.metrics["llm_calls_saved"] += max(0, len(all_docs) - 1)
 
-        # Stage 4: 生成（选择生成策略并调用 LLM 产出答案）
-        answer, was_corrected = await self._generate(question, reranked_docs)
-        self.metrics["was_corrected"] = was_corrected
-        self.metrics["llm_calls"] += 1  # 生成至少 1 次
-        if was_corrected:
-            self.metrics["llm_calls"] += 2  # 反思验证 + 修正
-
-        # 总耗时
-        self.metrics["total_ms"] = round((time.time() - total_start) * 1000, 1)
-
         # 构建来源：截取每个文档前 500 字返回给前端
-        sources = []
-        for doc in reranked_docs:
-            sources.append(SourceDocument(
+        sources = [
+            SourceDocument(
                 content=doc.page_content[:500],
                 metadata=doc.metadata,
                 score=None,
-            ))
+            )
+            for doc in reranked_docs
+        ]
 
-        # 组装最终响应
-        return ChatResponse(
-            answer=answer,
+        return PreparedContext(
+            context=build_context(reranked_docs),
+            docs=reranked_docs,
             sources=sources,
-            metrics=StageMetrics(**self.metrics),
-            rewritten_queries=rewritten_queries,  # 重写/分解后的查询（供前端展示）
-            kg_entities=kg_entities or None,  # KG 实体（无则返回 None）
-            generation_strategy=self.config.generation_strategy.value,
-            pipeline_config=self.config.to_dict(),
+            kg_entities=kg_entities,
+            rewritten_queries=rewritten_queries,
         )
 
     # ---- Stage 1: 查询变换 ----
@@ -289,19 +317,26 @@ class RAGPipeline:
 
     # ---- Stage 4: 生成 ----
 
-    async def _generate(self, question: str, docs: list[Document]) -> tuple[str, bool]:
+    def _select_prompt(self):
+        """按生成策略选择提示词模板"""
+        strategy = self.config.generation_strategy
+        if strategy == GenerationStrategy.COT:
+            return LEGAL_COT_PROMPT  # 链式推理模板
+        if strategy == GenerationStrategy.STRUCTURED:
+            return LEGAL_STRUCTURED_PROMPT  # 结构化法律回答模板
+        return LEGAL_QA_PROMPT  # 标准问答模板（含 SELF_REFLECT 的初答阶段）
+
+    async def _generate(
+        self,
+        question: str,
+        docs: list[Document],
+        context: str | None = None,
+    ) -> tuple[str, bool]:
         """按生成策略调用 LLM 产出答案，返回 (answer, was_corrected)"""
         t0 = time.time()  # 生成计时起点
-        context = build_context(docs)  # 将文档拼装为受限长度的上下文
+        context = context if context is not None else build_context(docs)  # 复用检索阶段的上下文
+        prompt = self._select_prompt()
         strategy = self.config.generation_strategy
-
-        # 选择 prompt
-        if strategy == GenerationStrategy.COT:
-            prompt = LEGAL_COT_PROMPT  # 链式推理模板
-        elif strategy == GenerationStrategy.STRUCTURED:
-            prompt = LEGAL_STRUCTURED_PROMPT  # 结构化法律回答模板
-        else:
-            prompt = LEGAL_QA_PROMPT  # 标准问答模板（含 SELF_REFLECT 的初答阶段）
 
         llm = get_llm()
         chain = prompt | llm  # LCEL 链：提示词模板 + 模型
@@ -328,6 +363,60 @@ class RAGPipeline:
 
         self.metrics["generation_ms"] = round((time.time() - t0) * 1000, 1)
         return answer, was_corrected
+
+    async def stream_generate(
+        self,
+        question: str,
+        docs: list[Document],
+        enable_thinking: bool = True,
+        context: str | None = None,
+    ) -> AsyncIterator[tuple[str, str]]:
+        """流式生成：逐段产出 ("reasoning" | "answer", 文本增量)
+
+        直接使用 OpenAI 兼容客户端（而非 ChatOpenAI），因为 langchain-openai
+        会丢弃非标准字段 ``reasoning_content``，导致思考过程不可见。
+        """
+        t0 = time.time()  # 生成计时起点
+        context = context if context is not None else build_context(docs)
+        prompt = self._select_prompt()
+        messages = convert_to_openai_messages(
+            prompt.format_messages(context=context, question=question)
+        )
+
+        client = AsyncOpenAI(
+            api_key=resolve_api_key(),  # 当前用户自己的 Key
+            base_url=settings.SILICONFLOW_BASE_URL,
+            timeout=settings.LLM_TIMEOUT,
+        )
+        request_kwargs = {
+            "model": settings.LLM_MODEL,
+            "messages": messages,
+            "stream": True,
+            # 硅基流动 DeepSeek-V3.2 的非标准参数：开启后返回 reasoning_content
+            "extra_body": {"enable_thinking": bool(enable_thinking)},
+        }
+        if not enable_thinking:
+            # 思考模式不支持 temperature，仅在非思考模式下传入
+            request_kwargs["temperature"] = settings.LLM_TEMPERATURE
+
+        try:
+            stream = await client.chat.completions.create(**request_kwargs)
+            try:
+                async for chunk in stream:
+                    if not chunk.choices:  # 末尾 usage chunk 等无 choices 的分片
+                        continue
+                    delta = chunk.choices[0].delta
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if reasoning:
+                        yield "reasoning", reasoning
+                    if delta.content:
+                        yield "answer", delta.content
+            finally:
+                if hasattr(stream, "close"):
+                    await stream.close()
+        finally:
+            self.metrics["generation_ms"] = round((time.time() - t0) * 1000, 1)
+            await client.close()
 
 
 # ===================== 公共辅助函数 =====================

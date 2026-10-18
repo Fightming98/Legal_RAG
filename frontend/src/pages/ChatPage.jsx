@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { Send, Activity, ChevronDown, ChevronUp, Download, Save, Clock, FileText } from 'lucide-react'
-import { sendChat, getSystemInfo, saveChatRecord, listChatRecords, getChatRecordDownloadUrl } from '../services/api'
+import { Send, Activity, ChevronDown, ChevronUp, Download, Save, Clock, Sparkles } from 'lucide-react'
+import { streamChat, getSystemInfo, saveChatRecord, listChatRecords, getChatRecordDownloadUrl } from '../services/api'
 
 export default function ChatPage() {
   const [messages, setMessages] = useState([])
@@ -18,6 +18,7 @@ export default function ChatPage() {
   const [rerankStrategy, setRerankStrategy] = useState('simple')
   const [generationStrategy, setGenerationStrategy] = useState('standard')
   const [useKg, setUseKg] = useState(false)
+  const [enableThinking, setEnableThinking] = useState(true)  // 模型思考模式（可展开查看）
 
   // 实时监控
   const [liveMonitor, setLiveMonitor] = useState(null)
@@ -28,10 +29,15 @@ export default function ChatPage() {
   const [showRecords, setShowRecords] = useState(false)
 
   const bottomRef = useRef(null)
+  const abortRef = useRef(null)  // 当前流式请求，在组件卸载时中断
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, liveMonitor])
+    // 流式输出期间用即时滚动，避免平滑动画堆积
+    bottomRef.current?.scrollIntoView({ behavior: loading ? 'auto' : 'smooth' })
+  }, [messages, liveMonitor, loading])
+
+  // 离开页面时中断未完成的流式请求
+  useEffect(() => () => abortRef.current?.abort(), [])
 
   // 开始实时监控
   const startLiveMonitor = useCallback(() => {
@@ -74,6 +80,7 @@ export default function ChatPage() {
     const q = input.trim()
     if (!q || loading) return
 
+    const assistantId = `assistant-${Date.now()}`
     setMessages(prev => [...prev, { role: 'user', content: q }])
     setInput('')
     setLoading(true)
@@ -83,8 +90,53 @@ export default function ChatPage() {
       startLiveMonitor()
     }
 
+    // 先插入助手占位消息，后续流式事件持续更新它
+    setMessages(prev => [...prev, {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      reasoning: '',
+      stages: [],
+      streaming: true,
+      thinkingExpanded: false,  // 思考过程默认折叠，点击标题手动展开
+      sources: [],
+      metrics: null,
+      question: q,
+    }])
+
+    // 流式增量先写入本地缓冲，每 ~50ms 批量提交一次，避免逐 token 重渲染
+    let pendingContent = ''
+    let pendingReasoning = ''
+    let flushTimer = null
+
+    const flush = () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer)
+        flushTimer = null
+      }
+      if (!pendingContent && !pendingReasoning) return
+      const contentDelta = pendingContent
+      const reasoningDelta = pendingReasoning
+      pendingContent = ''
+      pendingReasoning = ''
+      setMessages(prev => prev.map(m => m.id === assistantId
+        ? { ...m, content: m.content + contentDelta, reasoning: m.reasoning + reasoningDelta }
+        : m))
+    }
+
+    const scheduleFlush = () => {
+      if (!flushTimer) flushTimer = setTimeout(flush, 50)
+    }
+
+    const updateMessage = (updater) => {
+      setMessages(prev => prev.map(m => m.id === assistantId ? updater(m) : m))
+    }
+
+    const controller = new AbortController()
+    abortRef.current = controller
+
     try {
-      const result = await sendChat({
+      await streamChat({
         question: q,
         useRerank,
         useQueryRewrite: useRewrite,
@@ -95,34 +147,98 @@ export default function ChatPage() {
         rerankStrategy,
         generationStrategy,
         useKg,
+        enableThinking,
+      }, {
+        signal: controller.signal,
+        onEvent: ({ event, data }) => {
+          switch (event) {
+            case 'stage':
+              updateMessage(m => ({ ...m, stages: [...m.stages, data] }))
+              break
+            case 'sources':
+              updateMessage(m => ({
+                ...m,
+                sources: data.sources || [],
+                rewrittenQueries: data.rewritten_queries,
+                kgEntities: data.kg_entities,
+                systemBefore: data.system_before,
+                metrics: data.metrics || m.metrics,
+              }))
+              break
+            case 'reasoning':
+              pendingReasoning += data.delta || ''
+              scheduleFlush()
+              break
+            case 'answer':
+              pendingContent += data.delta || ''
+              scheduleFlush()
+              break
+            case 'answer_replace':
+              // 自我反思修正：用完整修正稿替换此前流式内容
+              flush()
+              updateMessage(m => ({ ...m, content: data.answer || '', wasCorrected: true }))
+              break
+            case 'metrics':
+              updateMessage(m => ({ ...m, metrics: data }))
+              break
+            case 'quality':
+              updateMessage(m => ({ ...m, quality: data }))
+              break
+            case 'done':
+              flush()
+              updateMessage(m => ({
+                ...m,
+                streaming: false,
+                generationStrategy: data.generation_strategy,
+                pipelineConfig: data.pipeline_config,
+                systemBefore: data.system_before ?? m.systemBefore,
+                systemAfter: data.system_after,
+                wasCorrected: data.was_corrected ?? m.wasCorrected,
+              }))
+              setLoading(false)
+              stopLiveMonitor()
+              break
+            case 'error':
+              flush()
+              updateMessage(m => ({
+                ...m,
+                streaming: false,
+                content: m.content || `请求失败: ${data.detail}`,
+                error: data.detail,
+              }))
+              setLoading(false)
+              stopLiveMonitor()
+              break
+            default:
+              break
+          }
+        },
       })
-
-      // 停止实时监控
-      stopLiveMonitor()
-
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: result.answer,
-        sources: result.sources,
-        metrics: result.metrics,
-        rewrittenQueries: result.rewritten_queries,
-        systemBefore: result.system_before,
-        systemAfter: result.system_after,
-        quality: result.quality,
-        question: q,
-        kgEntities: result.kg_entities,
-        generationStrategy: result.generation_strategy,
-        pipelineConfig: result.pipeline_config,
-      }])
     } catch (err) {
-      stopLiveMonitor()
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: `请求失败: ${err.response?.data?.detail || err.message}`,
-      }])
-    } finally {
+      flush()
+      if (err.name === 'AbortError') {
+        updateMessage(m => ({ ...m, streaming: false }))
+      } else {
+        updateMessage(m => ({
+          ...m,
+          streaming: false,
+          content: m.content || `请求失败: ${err.message}`,
+          error: err.message,
+        }))
+      }
       setLoading(false)
+      stopLiveMonitor()
+    } finally {
+      flush()  // 提交可能残留在缓冲区中的最后一段增量
+      abortRef.current = null
     }
+  }
+
+  // 手动展开 / 折叠某条消息的思考过程
+  const toggleThinking = (id) => {
+    setMessages(prev => prev.map(m => m.id === id
+      ? { ...m, thinkingExpanded: !m.thinkingExpanded }
+      : m))
   }
 
   const handleKeyDown = (e) => {
@@ -192,6 +308,10 @@ export default function ChatPage() {
               <option value="structured_legal">结构化法律回答</option>
             </select>
           </label>
+          <label className="option-label" title="开启模型思考模式，回答上方的思考过程可点击展开">
+            <input type="checkbox" checked={enableThinking} onChange={e => setEnableThinking(e.target.checked)} />
+            深度思考
+          </label>
         </div>
         <div style={{ borderLeft: '1px solid var(--border)', height: 20, margin: '0 4px' }} />
         <label className="option-label" style={{ color: enableMonitor ? 'var(--primary)' : undefined }}>
@@ -219,7 +339,29 @@ export default function ChatPage() {
           <div key={i} className={`message ${msg.role}`}>
             <div className="message-bubble">
               {msg.role === 'assistant' ? (
-                <ReactMarkdown>{msg.content}</ReactMarkdown>
+                <>
+                  {/* 思考过程 / 检索过程：默认折叠，点击标题展开 */}
+                  <ThinkingPanel msg={msg} onToggle={() => toggleThinking(msg.id)} />
+
+                  {msg.content ? (
+                    <>
+                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                      {msg.streaming && <span className="stream-cursor" />}
+                    </>
+                  ) : msg.streaming ? (
+                    <div className="thinking-status">
+                      <span className="spinner" />
+                      {msg.reasoning ? '正在思考' : '正在检索资料'}
+                      <span className="loading-dots"></span>
+                    </div>
+                  ) : null}
+
+                  {msg.streaming && liveMonitor && <LiveMonitorBar info={liveMonitor} />}
+
+                  {msg.error && msg.content && (
+                    <div className="stream-error">{msg.error}</div>
+                  )}
+                </>
               ) : (
                 msg.content
               )}
@@ -263,7 +405,7 @@ export default function ChatPage() {
                 </div>
               )}
 
-              {msg.metrics && (
+              {msg.metrics?.total_ms != null && (
                 <div className="metrics-bar">
                   {msg.metrics.query_rewrite_ms != null && <span className="metric-tag">查询变换 {msg.metrics.query_rewrite_ms}ms</span>}
                   <span className="metric-tag">检索 {msg.metrics.retrieval_ms}ms</span>
@@ -283,31 +425,6 @@ export default function ChatPage() {
           </div>
         ))}
 
-        {/* 加载中 + 实时监控 */}
-        {loading && (
-          <div className="message assistant">
-            <div className="message-bubble">
-              <span className="spinner" /> 正在思考<span className="loading-dots"></span>
-              {liveMonitor && (
-                <div className="live-monitor-bar" style={{ marginTop: 10 }}>
-                  <Activity size={14} style={{ color: 'var(--primary)' }} />
-                  <div className="monitor-item">
-                    <span className="label">CPU</span>
-                    <span className="value">{liveMonitor.cpu_percent}%</span>
-                  </div>
-                  <div className="monitor-item">
-                    <span className="label">内存</span>
-                    <span className="value">{liveMonitor.memory_percent}%</span>
-                  </div>
-                  <div className="monitor-item">
-                    <span className="label">已用</span>
-                    <span className="value">{liveMonitor.memory_used_gb}GB</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
         <div ref={bottomRef} />
       </div>
 
@@ -357,6 +474,64 @@ export default function ChatPage() {
         <button className="btn btn-primary" onClick={handleSend} disabled={loading || !input.trim()}>
           <Send size={16} /> 发送
         </button>
+      </div>
+    </div>
+  )
+}
+
+
+// ===================== 思考过程面板 =====================
+
+function ThinkingPanel({ msg, onToggle }) {
+  const { reasoning = '', stages = [], streaming, thinkingExpanded } = msg
+  const hasThought = Boolean(reasoning) || stages.length > 0
+
+  if (!hasThought && !streaming) return null
+
+  const label = reasoning ? '思考过程' : '检索过程'
+  return (
+    <div className={`thinking-panel${streaming ? ' is-streaming' : ''}`}>
+      <button
+        type="button"
+        className="thinking-header"
+        onClick={onToggle}
+        disabled={!hasThought}
+      >
+        <Sparkles size={13} />
+        <span className="thinking-label">{label}</span>
+        <span className="thinking-state">{streaming ? '进行中…' : '已完成'}</span>
+        {hasThought && (thinkingExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />)}
+      </button>
+      {thinkingExpanded && hasThought && (
+        <div className="thinking-body">
+          {stages.length > 0 && (
+            <ul className="thinking-stages">
+              {stages.map((s, idx) => <li key={idx}>{s.message}</li>)}
+            </ul>
+          )}
+          {reasoning && <div className="thinking-reasoning">{reasoning}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 实时监控条（流式期间展示）
+function LiveMonitorBar({ info }) {
+  return (
+    <div className="live-monitor-bar" style={{ marginTop: 10 }}>
+      <Activity size={14} style={{ color: 'var(--primary)' }} />
+      <div className="monitor-item">
+        <span className="label">CPU</span>
+        <span className="value">{info.cpu_percent}%</span>
+      </div>
+      <div className="monitor-item">
+        <span className="label">内存</span>
+        <span className="value">{info.memory_percent}%</span>
+      </div>
+      <div className="monitor-item">
+        <span className="label">已用</span>
+        <span className="value">{info.memory_used_gb}GB</span>
       </div>
     </div>
   )
