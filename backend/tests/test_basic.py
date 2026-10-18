@@ -15,7 +15,7 @@ def test_config_loads():
     assert settings.HYDE_TEMPERATURE == 0.7
     assert settings.SELF_REFLECT_MAX_ITER == 1
     assert settings.DEFAULT_QUERY_TRANSFORM == "none"
-    assert settings.DEFAULT_RERANK == "simple"
+    assert settings.DEFAULT_RERANK == "bge"
     assert settings.DEFAULT_GENERATION == "standard"
 
 

@@ -1,4 +1,8 @@
-"""混合检索器 — BM25 稀疏检索 + 向量稠密检索 + RRF 融合"""
+"""混合检索器 — BM25 稀疏检索 + 向量稠密检索 + RRF 融合
+
+- ``HybridRetriever`` 负责单次查询内部的多通道融合（BM25 + 各集合向量检索）；
+- ``rrf_fuse_ranked_lists`` 负责多查询/多路召回之间的 RRF 融合（供管线层调用）。
+"""
 
 import jieba
 from langchain_core.documents import Document
@@ -186,3 +190,43 @@ def get_hybrid_retriever(
     """获取混合检索器"""
     names = collection_names or ["laws", "cases"]  # 默认检索法条与案例两个集合
     return HybridRetriever(collection_names=names)
+
+
+def rrf_fuse_ranked_lists(
+    ranked_lists: list[list[Document]],
+    *,
+    rrf_k: int = 60,
+    weights: list[float] | None = None,
+) -> list[Document]:
+    """对多路召回结果做加权 RRF（倒数排名融合）
+
+    每个子列表代表一路召回（例如多查询改写中的每个查询、HyDE 检索），
+    列表内部已按相关性降序。对第 rank 名（从 0 开始）的文档贡献
+    ``weight / (rrf_k + rank + 1)``；同一文档被多路命中时分数累加。
+    返回按融合分数降序、内容去重后的文档列表。
+
+    Args:
+        ranked_lists: 多路召回的文档列表，每个列表内部已按相关性降序。
+        rrf_k: RRF 常数，越大排名差异越平滑。
+        weights: 每路召回的权重；缺省时所有路权重相同（1.0）。
+    """
+    if not ranked_lists:
+        return []
+
+    if weights is None:
+        weights = [1.0] * len(ranked_lists)
+
+    fused: dict[int, dict] = {}  # content_hash -> {doc, rrf_score}
+    for route_idx, docs in enumerate(ranked_lists):
+        # 权重按路对齐；缺失时按 1.0 处理，避免调用方传入短列表时报错
+        weight = weights[route_idx] if route_idx < len(weights) else 1.0
+        for rank, doc in enumerate(docs):
+            key = hash(doc.page_content[:200])  # 文档去重键（与混合检索器保持一致）
+            score = weight / (rrf_k + rank + 1)
+            if key in fused:
+                fused[key]["score"] += score  # 多路命中：累加 RRF 分数
+            else:
+                fused[key] = {"doc": doc, "score": score}
+
+    sorted_results = sorted(fused.values(), key=lambda x: x["score"], reverse=True)
+    return [item["doc"] for item in sorted_results]

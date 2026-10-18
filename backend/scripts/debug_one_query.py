@@ -31,7 +31,7 @@ QUESTION = "故意杀人罪的量刑标准是什么？"
 
 CONFIG = PipelineConfig(
     query_transform=QueryTransformStrategy.HYDE,     # none / multi_query / hyde / decompose / multi_query_hyde
-    rerank_strategy=RerankStrategy.SIMPLE,           # none / simple / llm
+    rerank_strategy=RerankStrategy.BGE,              # none / simple / llm / bge
     generation_strategy=GenerationStrategy.STANDARD, # standard / chain_of_thought / self_reflect / structured_legal
     use_kg=True,                                     # 是否启用犯罪知识图谱
     top_k=5,

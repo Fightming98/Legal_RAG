@@ -35,7 +35,7 @@ async def stream_rag_query(
     top_k: int = 5,
     collection: str = "all",
     query_transform: str = "none",
-    rerank_strategy: str = "simple",
+    rerank_strategy: str = "bge",
     generation_strategy: str = "standard",
     use_kg: bool = False,
     enable_thinking: bool = True,

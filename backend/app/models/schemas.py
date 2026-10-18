@@ -70,7 +70,7 @@ class ChatRequest(BaseModel):
     monitor_system: bool = False
     # --- Advanced pipeline options ---
     query_transform: str = Field("none", pattern=r"^(none|multi_query|hyde|decompose|multi_query_hyde)$")
-    rerank_strategy: str = Field("simple", pattern=r"^(none|simple|llm)$")
+    rerank_strategy: str = Field("bge", pattern=r"^(none|simple|llm|bge)$")
     generation_strategy: str = Field("standard", pattern=r"^(standard|chain_of_thought|self_reflect|structured_legal)$")
     use_kg: bool = False
     enable_thinking: bool = True  # 是否开启模型思考模式（流式接口据此推送 reasoning_content）

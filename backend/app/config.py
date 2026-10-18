@@ -58,6 +58,14 @@ class Settings(BaseSettings):
     VECTOR_WEIGHT: float = 0.5  # 向量检索权重
     RERANK_TOP_K: int = 5  # 重排序后最终保留条数
 
+    # --- 多路召回融合（RRF）---
+    RECALL_RRF_K: int = 60  # 多查询/多路召回结果 RRF 融合常数（越大排名差异越平滑）
+
+    # --- 重排序（BGE reranker）---
+    RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"  # 硅基流动重排序模型
+    RERANK_TIMEOUT: int = 30  # 重排序接口超时时间（秒）
+    RERANK_DOC_MAX_CHARS: int = 2000  # 送入重排序模型的单篇文档最大字符数
+
     # --- 数据目录 ---
     DATA_DIR: str = str(Path(__file__).resolve().parent.parent / "data")  # 数据根目录
     LAWS_DIR: str = str(Path(__file__).resolve().parent.parent / "data" / "laws_slight")  # 法条数据目录
@@ -73,7 +81,7 @@ class Settings(BaseSettings):
     HYDE_TEMPERATURE: float = 0.7  # HYDE（假设性文档嵌入）生成温度
     SELF_REFLECT_MAX_ITER: int = 1  # 自反思（self-reflect）最大迭代次数
     DEFAULT_QUERY_TRANSFORM: str = "none"  # 默认查询改写策略（none / hyde 等）
-    DEFAULT_RERANK: str = "simple"  # 默认重排序策略（simple 等）
+    DEFAULT_RERANK: str = "bge"  # 默认重排序策略（bge / simple / llm / none）
     DEFAULT_GENERATION: str = "standard"  # 默认生成策略（standard 等）
 
     # 注：本机 / 项目根目录可能有一个共享的 .env（含 DEEPSEEK、ZHIPUAI、LANGSMITH

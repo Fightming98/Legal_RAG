@@ -11,8 +11,8 @@ from openai import AsyncOpenAI
 
 from app.core.api_key import resolve_api_key
 from app.core.llm import get_llm
-from app.core.retriever import get_hybrid_retriever
-from app.services.reranker import simple_rerank, llm_rerank
+from app.core.retriever import get_hybrid_retriever, rrf_fuse_ranked_lists
+from app.services.reranker import simple_rerank, llm_rerank, bge_rerank
 from app.services.query_rewriter import multi_query_rewrite
 from app.services.prompts import (
     LEGAL_QA_PROMPT,
@@ -43,6 +43,7 @@ class RerankStrategy(str, Enum):
     NONE = "none"  # 不重排，直接取检索结果前 top_k
     SIMPLE = "simple"  # 简单重排：基于 jieba 关键词 Jaccard 相似度（零 LLM 开销）
     LLM = "llm"  # LLM 重排：批量评分，更准确但消耗一次 LLM 调用
+    BGE = "bge"  # BGE 精排：硅基流动 BAAI/bge-reranker-v2-m3，按相关性分数排序（默认）
 
 
 class GenerationStrategy(str, Enum):
@@ -59,7 +60,7 @@ class GenerationStrategy(str, Enum):
 class PipelineConfig:
     """RAG 管线各阶段的策略配置"""
     query_transform: QueryTransformStrategy = QueryTransformStrategy.NONE  # 查询变换策略
-    rerank_strategy: RerankStrategy = RerankStrategy.SIMPLE  # 重排序策略
+    rerank_strategy: RerankStrategy = RerankStrategy.BGE  # 重排序策略（默认 BGE 精排）
     generation_strategy: GenerationStrategy = GenerationStrategy.SELF_REFLECT  # 生成策略
     use_kg: bool = False  # 是否启用犯罪知识图谱增强
     top_k: int = 5  # 最终返回给生成阶段的最大文档数
@@ -240,33 +241,27 @@ class RAGPipeline:
     # ---- Stage 2: 检索 ----
 
     async def _retrieve(self, search_queries: list[str], hyde_doc: str | None) -> list[Document]:
-        """执行检索：常规多查询检索 + 可选的 HyDE 分离式检索，按内容去重合并"""
+        """执行检索：HyDE / 多查询各自作为一路召回，最后用 RRF 融合多路结果"""
         t0 = time.time()  # 检索计时起点
-        retriever = get_hybrid_retriever(self.config.collection_names)  # 获取混合检索器（BM25+向量）
+        retriever = get_hybrid_retriever(self.config.collection_names)  # 混合检索器（BM25+向量）
 
-        all_docs: list[Document] = []  # 合并后的文档列表
-        seen_contents: set[int] = set()  # 内容哈希集合，用于去重
+        ranked_lists: list[list[Document]] = []  # 多路召回的已排序结果
 
         if hyde_doc:
-            # 使用 split query: BM25 用原始查询, 向量用假设文档
-            docs = retriever.search_with_split_queries(
-                bm25_query=search_queries[0],
-                vector_query=hyde_doc,
+            # HyDE 作为独立一路：BM25 用原始查询，向量用假设文档
+            ranked_lists.append(
+                retriever.search_with_split_queries(
+                    bm25_query=search_queries[0],
+                    vector_query=hyde_doc,
+                )
             )
-            for doc in docs:
-                key = hash(doc.page_content[:200])
-                if key not in seen_contents:  # 去重后追加
-                    seen_contents.add(key)
-                    all_docs.append(doc)
 
-        # 常规多查询检索：对每个查询分别检索并去重合并
+        # 常规多查询检索：每个查询作为一路召回
         for q in search_queries:
-            docs = retriever.invoke(q)
-            for doc in docs:
-                key = hash(doc.page_content[:200])
-                if key not in seen_contents:
-                    seen_contents.add(key)
-                    all_docs.append(doc)
+            ranked_lists.append(retriever.invoke(q))
+
+        # 多路召回之间做 RRF 融合（而非按查询顺序简单拼接）
+        all_docs = rrf_fuse_ranked_lists(ranked_lists, rrf_k=settings.RECALL_RRF_K)
 
         self.metrics["retrieval_ms"] = round((time.time() - t0) * 1000, 1)
         return all_docs
@@ -304,6 +299,9 @@ class RAGPipeline:
                 reranked = [doc for doc, _ in scored]
             elif strategy == RerankStrategy.LLM:
                 scored = await llm_rerank(question, all_docs, top_k=top_k)  # LLM 批量评分重排
+                reranked = [doc for doc, _ in scored]
+            elif strategy == RerankStrategy.BGE:
+                scored = await bge_rerank(question, all_docs, top_k=top_k)  # BGE 交叉编码器精排
                 reranked = [doc for doc, _ in scored]
             else:
                 reranked = all_docs[:top_k]

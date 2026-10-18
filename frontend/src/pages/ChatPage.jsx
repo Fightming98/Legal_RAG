@@ -15,7 +15,7 @@ export default function ChatPage() {
 
   // 高级管线选项
   const [queryTransform, setQueryTransform] = useState('none')
-  const [rerankStrategy, setRerankStrategy] = useState('simple')
+  const [rerankStrategy, setRerankStrategy] = useState('bge')
   const [generationStrategy, setGenerationStrategy] = useState('standard')
   const [useKg, setUseKg] = useState(false)
   const [enableThinking, setEnableThinking] = useState(true)  // 模型思考模式（可展开查看）
@@ -283,6 +283,7 @@ export default function ChatPage() {
           </label>
           <label className="option-label" title="重排策略">
             <select className="select-small" value={rerankStrategy} onChange={e => setRerankStrategy(e.target.value)}>
+              <option value="bge">BGE精排</option>
               <option value="none">无重排</option>
               <option value="simple">简单重排</option>
               <option value="llm">LLM重排</option>

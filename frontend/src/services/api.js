@@ -101,7 +101,7 @@ function buildChatPayload({
   evaluateQuality = false,
   monitorSystem = false,
   queryTransform = 'none',
-  rerankStrategy = 'simple',
+  rerankStrategy = 'bge',
   generationStrategy = 'standard',
   useKg = false,
   enableThinking = true,

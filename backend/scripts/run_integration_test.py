@@ -18,11 +18,12 @@ QT = {
     "decompose": QueryTransformStrategy.DECOMPOSE,
     "multi_query_hyde": QueryTransformStrategy.MULTI_QUERY_HYDE,
 }
-# RR: 重排序策略（none / simple / llm）
+# RR: 重排序策略（none / simple / llm / bge）
 RR = {
     "none": RerankStrategy.NONE,
     "simple": RerankStrategy.SIMPLE,
     "llm": RerankStrategy.LLM,
+    "bge": RerankStrategy.BGE,
 }
 # GS: 生成策略（standard / chain_of_thought / self_reflect / structured_legal）
 GS = {

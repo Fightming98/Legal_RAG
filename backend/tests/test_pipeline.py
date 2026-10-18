@@ -9,7 +9,7 @@ def test_pipeline_config_defaults():
 
     cfg = PipelineConfig()
     assert cfg.query_transform == QueryTransformStrategy.NONE
-    assert cfg.rerank_strategy == RerankStrategy.SIMPLE
+    assert cfg.rerank_strategy == RerankStrategy.BGE
     assert cfg.generation_strategy == GenerationStrategy.STANDARD
     assert cfg.use_kg is False
     assert cfg.top_k == 5
@@ -23,7 +23,7 @@ def test_pipeline_config_to_dict():
     cfg = PipelineConfig()
     d = cfg.to_dict()
     assert d["query_transform"] == "none"
-    assert d["rerank_strategy"] == "simple"
+    assert d["rerank_strategy"] == "bge"
     assert d["generation_strategy"] == "standard"
     assert d["use_kg"] is False
 
@@ -43,6 +43,7 @@ def test_strategy_enum_values():
     assert RerankStrategy("none") == RerankStrategy.NONE
     assert RerankStrategy("simple") == RerankStrategy.SIMPLE
     assert RerankStrategy("llm") == RerankStrategy.LLM
+    assert RerankStrategy("bge") == RerankStrategy.BGE
 
     # Generation
     assert GenerationStrategy("standard") == GenerationStrategy.STANDARD
@@ -57,7 +58,7 @@ def test_backward_compat_use_rerank_false():
 
     # 模拟 rag_service.py 中的映射逻辑
     use_rerank = False
-    rerank_strategy = "simple"
+    rerank_strategy = "bge"
 
     effective = rerank_strategy
     if not use_rerank:
@@ -107,3 +108,23 @@ def test_build_context_with_docs():
     ctx = build_context(docs)
     assert "来源1" in ctx
     assert "测试法律条文内容" in ctx
+
+
+def test_rrf_fuse_ranked_lists_prefers_multi_route_docs():
+    """测试召回层 RRF：被多路同时命中的文档优先，且结果按内容去重"""
+    from langchain_core.documents import Document
+    from app.core.retriever import rrf_fuse_ranked_lists
+
+    d1 = Document(page_content="文档A" * 20)
+    d2 = Document(page_content="文档B" * 20)
+    d3 = Document(page_content="文档C" * 20)
+
+    # 两路召回：d2 在两路中都出现，分数累加后应排到第一
+    fused = rrf_fuse_ranked_lists([[d1, d2], [d2, d3]], rrf_k=60)
+
+    assert [doc.page_content for doc in fused] == [
+        d2.page_content,
+        d1.page_content,
+        d3.page_content,
+    ]
+    assert len(fused) == 3  # d2 只保留一次

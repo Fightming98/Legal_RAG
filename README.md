@@ -41,8 +41,8 @@
 
 - **云端模型服务**：LLM（DeepSeek-V3.2）与 Embedding（BGE-M3）均通过硅基流动 OpenAI 兼容 API 调用，本地零 GPU 依赖、响应快
 - **法律领域深度优化**：6 项针对法律文本特征的专属 RAG 优化方案
-- **可插拔管线架构**：查询变换（5 种）/ 重排序（3 种）/ 生成（4 种）阶段均支持策略切换，前端可视化配置
-- **混合检索**：BM25（jieba 分词）稀疏检索 + BGE-M3 稠密向量检索 + RRF 融合，兼顾关键词精确匹配与语义召回
+- **可插拔管线架构**：查询变换（5 种）/ 重排序（4 种）/ 生成（4 种）阶段均支持策略切换，前端可视化配置
+- **混合检索**：BM25（jieba 分词）稀疏检索 + BGE-M3 稠密向量检索 + 多路召回 RRF 融合，兼顾关键词精确匹配与语义召回
 - **知识图谱增强**：内置 455+ 罪名犯罪知识图谱（定义 / 构成要件 / 量刑标准 / 相关法条），精确匹配并入检索结果
 - **前后端分离**：FastAPI 异步后端 + React（Vite）单页前端
 - **性能与质量评估**：内置 CPU / 内存实时监控、各阶段延迟分解、ROUGE / 忠实度 / 相关性自动评估
@@ -69,7 +69,7 @@
 │  │  Stage 1 查询变换                                           │  │
 │  │   [无 | 多查询扩展 | HyDE | 子问题分解 | 多查询+HyDE]        │  │
 │  │              ↓                                             │  │
-│  │  Stage 2 混合检索 (BM25 + 向量 + RRF)                       │  │
+│  │  Stage 2 混合检索 (BM25 + 向量 + 多路 RRF)                  │  │
 │  │   + Stage 2.5 犯罪知识图谱 (可选, 并行)                     │  │
 │  │              ↓                                             │  │
 │  │  Stage 3 重排序                                             │  │
@@ -104,12 +104,16 @@
 
   Stage 2 混合检索
     BM25 (jieba 分词) + BGE-M3 向量检索 → RRF 融合
+    多查询 / HyDE 各路召回结果之间再做 RRF 融合（不再按查询顺序拼接）
     + Stage 2.5 犯罪知识图谱查找（可选，并行，精确匹配罪名）
 
   Stage 3 重排序 (rerank_strategy)
-    ├── none   — 不重排，直接使用 RRF 融合的原始排序
+    ├── bge    — 硅基流动 BAAI/bge-reranker-v2-m3 交叉编码器精排，仅按相关性分数排序（默认）
+    ├── none   — 不重排，直接使用检索阶段 RRF 融合的原始排序
     ├── simple — Jaccard 关键词重叠 + 法律名称 / 条号 / 案号元数据加分
     └── llm    — 简单重排预筛选后，LLM 单次批量评分
+
+  （bge 策略在重排序接口异常时自动回退为 simple，保证问答主流程可用）
 
   Stage 4 生成 (generation_strategy)
     ├── standard         — 标准法律问答 Prompt
@@ -143,6 +147,7 @@
 |------|------|------|
 | 主模型 | DeepSeek-V3.2（硅基流动 API） | 云端强模型，无本地显存负担 |
 | Embedding | BGE-M3（硅基流动 API） | 多语言多粒度，中文检索效果好 |
+| 重排序 | BAAI/bge-reranker-v2-m3（硅基流动 API） | 交叉编码器精排，按相关性分数决定最终顺序 |
 | 向量数据库 | ChromaDB | 轻量嵌入式、零配置部署、自带持久化与元数据过滤 |
 | 稀疏检索 | BM25（rank-bm25 + jieba） | 精确匹配法条编号与关键词 |
 | RAG 框架 | LangChain | 组件化设计、生态成熟 |
@@ -174,7 +179,7 @@ Legal_rag/
 │   │   │   ├── llm.py                 # DeepSeek-V3.2 初始化（ChatOpenAI → 硅基流动）
 │   │   │   ├── embeddings.py          # BGE-M3 初始化（按请求动态解析 Key 的代理）
 │   │   │   ├── vectorstore.py         # ChromaDB 向量数据库（带实例缓存）
-│   │   │   ├── retriever.py           # 混合检索器（BM25 + 向量 + RRF）
+│   │   │   ├── retriever.py           # 混合检索器（BM25 + 向量 + 多路 RRF）
 │   │   │   └── logging.py             # 日志配置
 │   │   ├── services/                  # 业务逻辑层
 │   │   │   ├── pipeline.py            # 可插拔 RAG 管线编排器（策略枚举 + PipelineConfig）
@@ -185,7 +190,7 @@ Legal_rag/
 │   │   │   ├── rag_service.py         # RAG 入口（向后兼容包装器）
 │   │   │   ├── stream_service.py      # 流式 RAG 事件流（思考/回答/来源/指标）
 │   │   │   ├── kb_service.py          # 知识库管理（上传/列表/删除/重建）
-│   │   │   ├── reranker.py            # 重排序（Jaccard + 元数据 / LLM 批量评分）
+│   │   │   ├── reranker.py            # 重排序（BGE 精排 / Jaccard / LLM 批量评分）
 │   │   │   ├── query_rewriter.py      # 查询重写 + 术语规范化 + 查询分解
 │   │   │   ├── perf_service.py        # 性能基准测试与系统监控
 │   │   │   ├── quality_service.py     # 质量评估（ROUGE / 相关性 / 忠实度）
@@ -368,7 +373,7 @@ pytest tests/ -v
   "top_k": 5,
   "collection": "all",
   "query_transform": "hyde",
-  "rerank_strategy": "simple",
+  "rerank_strategy": "bge",
   "generation_strategy": "chain_of_thought",
   "use_kg": true,
   "evaluate_quality": false,
@@ -380,7 +385,7 @@ pytest tests/ -v
 |------|--------|--------|------|
 | `question` | — | 必填 | 用户问题（1-2000 字） |
 | `query_transform` | `none` / `multi_query` / `hyde` / `decompose` / `multi_query_hyde` | `none` | 查询变换策略 |
-| `rerank_strategy` | `none` / `simple` / `llm` | `simple` | 重排序策略 |
+| `rerank_strategy` | `none` / `simple` / `llm` / `bge` | `bge` | 重排序策略（`bge`：BAAI/bge-reranker-v2-m3 交叉编码器精排，仅按相关性分数排序） |
 | `generation_strategy` | `standard` / `chain_of_thought` / `self_reflect` / `structured_legal` | `standard` | 生成策略 |
 | `use_kg` | `true` / `false` | `false` | 犯罪知识图谱增强 |
 | `collection` | `all` / `laws` / `cases` | `all` | 检索范围 |
@@ -467,11 +472,15 @@ pytest tests/ -v
 | `RETRIEVAL_TOP_K` | `10` | 初始检索候选条数 |
 | `BM25_WEIGHT` / `VECTOR_WEIGHT` | `0.5` / `0.5` | BM25 / 向量检索融合权重 |
 | `RERANK_TOP_K` | `5` | 重排序后最终保留条数 |
+| `RECALL_RRF_K` | `60` | 多查询 / 多路召回结果 RRF 融合常数 |
+| `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | 硅基流动重排序模型（`bge` 策略使用） |
+| `RERANK_TIMEOUT` | `30` | 重排序接口超时（秒） |
+| `RERANK_DOC_MAX_CHARS` | `2000` | 送入重排序模型的单文档最大字符数 |
 | `CONTEXTUAL_CHUNKING` | `true` | 是否启用上下文标头注入 |
 | `HYDE_TEMPERATURE` | `0.7` | HyDE 假设文档生成温度 |
 | `SELF_REFLECT_MAX_ITER` | `1` | 自我反思最大修正轮次 |
 | `DEFAULT_QUERY_TRANSFORM` | `none` | 默认查询变换策略 |
-| `DEFAULT_RERANK` | `simple` | 默认重排序策略 |
+| `DEFAULT_RERANK` | `bge` | 默认重排序策略 |
 | `DEFAULT_GENERATION` | `standard` | 默认生成策略 |
 
 ---

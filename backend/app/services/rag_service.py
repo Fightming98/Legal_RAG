@@ -20,7 +20,7 @@ async def rag_query(
     collection: str = "all",
     # --- 高级选项 ---
     query_transform: str = "none",
-    rerank_strategy: str = "simple",
+    rerank_strategy: str = "bge",
     generation_strategy: str = "standard",
     use_kg: bool = False,
 ) -> ChatResponse:
