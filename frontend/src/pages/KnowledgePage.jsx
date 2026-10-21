@@ -101,9 +101,9 @@ export default function KnowledgePage() {
           </select>
           <label className="btn btn-primary" style={{ cursor: uploading ? 'not-allowed' : 'pointer' }}>
             {uploading ? <><span className="spinner" /> 上传中...</> : <><Upload size={14} /> 选择文件</>}
-            <input type="file" accept=".txt,.md,.json" onChange={handleUpload} disabled={uploading} style={{ display: 'none' }} />
+            <input type="file" accept=".txt,.md,.json,.jsonl" onChange={handleUpload} disabled={uploading} style={{ display: 'none' }} />
           </label>
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>支持 .txt, .md, .json 格式</span>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>支持 .txt, .md, .json, .jsonl 格式</span>
         </div>
       </div>
 

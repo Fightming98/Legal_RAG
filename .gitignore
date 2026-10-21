@@ -28,6 +28,7 @@ backend/tests/chroma_db_test/
 *.log
 docs/
 backend/data/
+backend/data*.zip
 
 # 一次性实验 / 修复脚本（_ 开头且非 __init__）
 backend/scripts/_[a-z]*.py

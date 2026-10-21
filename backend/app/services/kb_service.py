@@ -1,12 +1,21 @@
 """知识库管理服务"""
 
 import os
-import json
-from pathlib import Path
-from langchain_core.documents import Document
-from app.core.vectorstore import get_vectorstore, reset_store_cache
-from app.core.embeddings import get_embeddings
-from app.utils.legal_chunker import split_legal_document
+
+from app.core.vectorstore import get_vectorstore
+from app.services.kb_importer import (
+    LegacyIndexError,
+    collect_files,
+    delete_source,
+    drop_collections,
+    has_legacy_data,
+    import_case_files,
+    import_cases_jsonl,
+    import_laws,
+    index_case_file,
+    index_case_jsonl_file,
+    index_law_file,
+)
 from app.models.schemas import KnowledgeFileInfo, KnowledgeStats
 from app.config import settings
 from app.core.logging import get_logger
@@ -14,19 +23,7 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-# ===================== 文件读取 =====================
-
-def _read_text_file(filepath: str) -> str:
-    """读取文本文件"""
-    encodings = ["utf-8", "gbk", "gb2312", "utf-16"]
-    for enc in encodings:
-        try:
-            with open(filepath, "r", encoding=enc) as f:
-                return f.read()
-        except (UnicodeDecodeError, UnicodeError):
-            continue
-    raise ValueError(f"无法解码文件: {filepath}")
-
+# ===================== 路径与文件工具 =====================
 
 def _detect_doc_type(filepath: str) -> str:
     """根据路径判断文档类型"""
@@ -36,19 +33,24 @@ def _detect_doc_type(filepath: str) -> str:
     return "law"
 
 
-def _collect_files(dir_path: str, extensions: set[str]) -> list[str]:
-    """递归收集目录下指定后缀的文件"""
-    results = []
-    if not os.path.isdir(dir_path):
-        return results
-    for root, _dirs, files in os.walk(dir_path):
-        for fname in sorted(files):
-            if fname.startswith("."):
-                continue
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in extensions:
-                results.append(os.path.join(root, fname))
-    return results
+def _safe_filename(filename: str) -> str:
+    """只保留文件名，阻止 ../ 或绝对路径写入数据目录之外"""
+    name = os.path.basename(filename.replace("\\", "/")).strip()
+    if not name or name in (".", ".."):
+        raise ValueError("文件名无效")
+    return name
+
+
+def _safe_join(base_dir: str, filename: str) -> str | None:
+    """把 filename 拼到 base_dir 下，并确保结果仍在 base_dir 内"""
+    base = os.path.abspath(base_dir)
+    target = os.path.abspath(os.path.join(base, filename))
+    try:
+        if os.path.commonpath([base, target]) != base:
+            return None
+    except ValueError:
+        return None
+    return target
 
 
 def _count_files(dir_path: str) -> int:
@@ -91,32 +93,52 @@ async def upload_document(
     content: bytes,
     doc_type: str | None = None,
 ) -> KnowledgeFileInfo:
-    """上传并索引一个文档"""
-    # 确定类型和目标目录
+    """上传并索引一个文档
+
+    与 import_data 共用确定性 ID：同一个文件重复上传只会在首次写入，
+    文件内容变化时按相同 ID 覆盖更新，并清理变短后残留的旧分块。
+    """
+    safe_name = _safe_filename(filename)
     if doc_type is None:
-        doc_type = _detect_doc_type(filename)
+        doc_type = _detect_doc_type(safe_name)
+
     target_dir = settings.CASES_DIR if doc_type == "case" else settings.LAWS_DIR
-    os.makedirs(target_dir, exist_ok=True)
+    collection_name = (
+        settings.CASES_COLLECTION if doc_type == "case" else settings.LAWS_COLLECTION
+    )
+    store = get_vectorstore(collection_name)
+
+    # 旧版随机 ID 数据无法与确定性 ID 去重，先要求用户重建索引
+    if has_legacy_data(store, collection_name, log=logger.warning):
+        raise LegacyIndexError(
+            "知识库中存在旧版随机 ID 数据，请先在「知识库管理」页点击「重建索引」，再上传文档。"
+        )
 
     # 保存文件
-    filepath = os.path.join(target_dir, filename)
+    os.makedirs(target_dir, exist_ok=True)
+    filepath = os.path.join(target_dir, safe_name)
     with open(filepath, "wb") as f:
         f.write(content)
 
-    # 读取并分块
-    text = _read_text_file(filepath)
-    chunks = split_legal_document(text, doc_type=doc_type, filename=filename)
+    # 读取并写入向量库（JSON/JSONL 案例按记录逐条索引，与批量导入保持一致）
+    ext = os.path.splitext(safe_name)[1].lower()
+    if doc_type == "case" and ext in (".json", ".jsonl"):
+        result = index_case_jsonl_file(
+            store, filepath, target_dir, max_new_cases=None, log=logger.info
+        )
+    elif doc_type == "case":
+        result = index_case_file(store, filepath, target_dir, log=logger.info)
+    else:
+        result = index_law_file(store, filepath, target_dir, log=logger.info)
 
-    # 写入向量库
-    collection_name = settings.CASES_COLLECTION if doc_type == "case" else settings.LAWS_COLLECTION
-    store = get_vectorstore(collection_name)
-    store.add_documents(chunks)
+    if result.total_chunks == 0:
+        raise ValueError(f"未能从 {safe_name} 中解析出有效分块")
 
     return KnowledgeFileInfo(
-        filename=filename,
+        filename=safe_name,
         doc_type=doc_type,
         size_bytes=len(content),
-        chunk_count=len(chunks),
+        chunk_count=result.total_chunks,
     )
 
 
@@ -127,9 +149,9 @@ def list_documents() -> list[KnowledgeFileInfo]:
     files: list[KnowledgeFileInfo] = []
     for dir_path, dtype, exts in [
         (settings.LAWS_DIR, "law", {".txt", ".md"}),
-        (settings.CASES_DIR, "case", {".txt", ".md", ".json"}),
+        (settings.CASES_DIR, "case", {".txt", ".md", ".json", ".jsonl"}),
     ]:
-        for fpath in _collect_files(dir_path, exts):
+        for fpath in collect_files(dir_path, exts):
             fname = os.path.relpath(fpath, dir_path)
             files.append(KnowledgeFileInfo(
                 filename=fname,
@@ -142,99 +164,50 @@ def list_documents() -> list[KnowledgeFileInfo]:
 # ===================== 删除文档 =====================
 
 def delete_document(filename: str) -> bool:
-    """删除文档文件（需要重建索引才能从向量库移除）"""
-    for dir_path in [settings.LAWS_DIR, settings.CASES_DIR]:
-        fpath = os.path.join(dir_path, filename)
-        if os.path.isfile(fpath):
-            os.remove(fpath)
-            return True
+    """删除文档文件，并同步清理向量库中的对应分块"""
+    rel_file = filename.replace("\\", "/")
+    for dir_path, collection_name in [
+        (settings.LAWS_DIR, settings.LAWS_COLLECTION),
+        (settings.CASES_DIR, settings.CASES_COLLECTION),
+    ]:
+        fpath = _safe_join(dir_path, rel_file)
+        if not fpath or not os.path.isfile(fpath):
+            continue
+
+        os.remove(fpath)
+        source_file = os.path.relpath(fpath, dir_path).replace(os.sep, "/")
+        try:
+            removed = delete_source(get_vectorstore(collection_name), source_file)
+            logger.info("已删除 %s 及 %d 个向量分块", source_file, removed)
+        except Exception:
+            logger.warning(
+                "已删除文件 %s，但清理向量分块失败，请重建索引", source_file, exc_info=True
+            )
+        return True
     return False
 
 
 # ===================== 重建索引 =====================
 
 async def rebuild_index() -> KnowledgeStats:
-    """从 data/ 目录重建全部向量索引"""
-    import chromadb
+    """从 data/ 目录重建全部向量索引
 
-    # 清除现有数据
-    reset_store_cache()
-    client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
-    for name in [settings.LAWS_COLLECTION, settings.CASES_COLLECTION]:
-        try:
-            client.delete_collection(name)
-        except chromadb.errors.NotFoundError:
-            pass  # 集合不存在是正常情况（首次重建），无需告警
-        except Exception:
-            logger.warning("删除集合 %s 失败", name, exc_info=True)
+    复用 import_data 的确定性 ID / 查重逻辑，重建结果与 CLI 导入完全一致。
+    """
+    if not drop_collections(log=logger.info):
+        raise RuntimeError(
+            "重建失败：无法删除旧集合，请先停止其他导入/重建任务后重试。"
+        )
 
     # --- 法律条文 ---
-    law_chunks: list[Document] = []
-    for fpath in _collect_files(settings.LAWS_DIR, {".txt", ".md"}):
-        try:
-            text = _read_text_file(fpath)
-            chunks = split_legal_document(text, doc_type="law", filename=os.path.basename(fpath))
-            law_chunks.extend(chunks)
-        except Exception:
-            # 单个文件解析失败不中断整体重建
-            logger.warning("解析法律文件 %s 失败，已跳过", fpath, exc_info=True)
-            continue
+    laws_store = get_vectorstore(settings.LAWS_COLLECTION)
+    import_laws(laws_store, settings.LAWS_DIR, log=logger.info)
 
-    if law_chunks:
-        reset_store_cache()
-        store = get_vectorstore(settings.LAWS_COLLECTION)
-        batch_size = 100
-        for i in range(0, len(law_chunks), batch_size):
-            store.add_documents(law_chunks[i : i + batch_size])
+    # --- 案例（JSONL/JSON + 整文件 TXT/MD）---
+    cases_store = get_vectorstore(settings.CASES_COLLECTION)
+    import_cases_jsonl(
+        cases_store, settings.CASES_DIR, max_cases=None, log=logger.info
+    )
+    import_case_files(cases_store, settings.CASES_DIR, log=logger.info)
 
-    # --- 案例 (JSONL) ---
-    case_chunks: list[Document] = []
-    case_count = 0
-    max_cases = 500
-    for fpath in _collect_files(settings.CASES_DIR, {".json"}):
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                for line in f:
-                    if case_count >= max_cases:
-                        break
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    text = obj.get("A", "")
-                    if not text or len(text) < 50:
-                        continue
-                    chunks = split_legal_document(
-                        text, doc_type="case",
-                        filename=f"{os.path.basename(fpath)}:案例{case_count + 1}",
-                    )
-                    case_chunks.extend(chunks)
-                    case_count += 1
-        except Exception:
-            logger.warning("处理案例文件 %s 失败，已跳过", fpath, exc_info=True)
-            continue
-        if case_count >= max_cases:
-            break
-
-    # 也导入 txt 格式案例
-    for fpath in _collect_files(settings.CASES_DIR, {".txt", ".md"}):
-        try:
-            text = _read_text_file(fpath)
-            chunks = split_legal_document(text, doc_type="case", filename=os.path.basename(fpath))
-            case_chunks.extend(chunks)
-        except Exception:
-            logger.warning("解析案例文件 %s 失败，已跳过", fpath, exc_info=True)
-            continue
-
-    if case_chunks:
-        reset_store_cache()
-        store = get_vectorstore(settings.CASES_COLLECTION)
-        batch_size = 100
-        for i in range(0, len(case_chunks), batch_size):
-            store.add_documents(case_chunks[i : i + batch_size])
-
-    reset_store_cache()
     return get_kb_stats()

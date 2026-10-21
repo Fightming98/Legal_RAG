@@ -195,6 +195,7 @@ Legal_rag/
 │   │   │   ├── rag_service.py         # RAG 入口（向后兼容包装器）
 │   │   │   ├── stream_service.py      # 流式 RAG 事件流（思考/回答/来源/指标）
 │   │   │   ├── kb_service.py          # 知识库管理（上传/列表/删除/重建）
+│   │   │   ├── kb_importer.py         # 索引核心：确定性 ID、内容指纹、幂等写入
 │   │   │   ├── reranker.py            # 重排序（BGE 精排 / Jaccard / LLM 批量评分）
 │   │   │   ├── query_rewriter.py      # 查询重写 + 术语规范化 + 查询分解
 │   │   │   ├── perf_service.py        # 性能基准测试与系统监控
@@ -216,7 +217,7 @@ Legal_rag/
 │   │   └── chat_records/              # 问答性能记录
 │   ├── scripts/                       # 数据处理与工具脚本
 │   │   ├── prepare_datasets.py        # 数据集格式转换与下载
-│   │   ├── import_data.py             # 数据分块并写入 ChromaDB
+│   │   ├── import_data.py             # CLI 导入入口（复用 kb_importer，支持断点续传）
 │   │   ├── convert_hf_laws.py         # HuggingFace 法律法规格式转换
 │   │   ├── crawl_laws.py              # 法律法规数据库爬虫（备用）
 │   │   ├── cleanup_chroma.py          # ChromaDB 清理工具
@@ -228,6 +229,8 @@ Legal_rag/
 │       ├── test_kg.py                 # 犯罪知识图谱模块
 │       ├── test_api_key.py            # 用户自带 Key：校验、上下文、401 行为
 │       ├── test_model_config.py       # 请求级模型覆盖：默认值、请求头校验、模型分类
+│       ├── test_import_idempotent.py  # 导入幂等/断点续传（确定性 ID、--rebuild）
+│       ├── test_kb_service_idempotent.py # 上传/重建与批量导入共用同一套 ID
 │       └── test_queries.txt           # 测试问题集
 │
 └── frontend/
@@ -325,12 +328,19 @@ npm run dev
 conda activate legal_rag
 cd backend
 python -m scripts.prepare_datasets   # 格式转换：ZIP → JSONL、CrimeKG → TXT、QA → 参考答案
-python -m scripts.import_data        # 分块并写入 ChromaDB 向量数据库
+python -m scripts.import_data        # 分块并写入 ChromaDB（幂等，中断后重跑即可续传）
 ```
 
-也可通过前端「知识库管理」页面上传文档，或调用 `POST /api/knowledge/rebuild` 重建索引。
+> 导入脚本会为每个分块生成确定性 ID，重复执行会跳过已存在的分块，中断后直接重跑即可从断点继续。首次从旧版本升级、切换 Embedding 模型或调整分块策略后，请执行 `python -m scripts.import_data --rebuild` 清空集合并全量重建（也可使用 `scripts/cleanup_chroma.py`）。
 
-> **注意**：切换 Embedding 模型后，旧的 `backend/chroma_db` 向量库不再兼容，**必须重建索引**。
+也可通过前端「知识库管理」页面上传文档，或调用 `POST /api/knowledge/rebuild` 重建索引。前端上传、重建索引与 `import_data` 共用 `app/services/kb_importer.py` 中的同一套确定性 ID / 查重逻辑：
+
+- 同一文件重复上传只会写入首次缺失的分块，不会产生重复向量；
+- `.json` / `.jsonl` 案例按记录逐条索引，与批量导入的 ID 完全一致；
+- 文件内容变短后重新上传，会按 `source_file` 清理残留的旧分块；
+- 删除文件时会同步删除向量库中的对应分块，无需再手动重建。
+
+> **注意**：切换 Embedding 模型后，旧的 `backend/chroma_db` 向量库不再兼容。导入脚本会检测模型变化并自动重新 Embedding 已有分块；若库中仍是旧版随机 ID 数据，请执行 `--rebuild` 全量重建后使用。旧版数据存在时，前端上传接口会返回 409 并提示先点击「重建索引」，避免新旧机制混用。
 
 ### 6. 运行测试
 
@@ -499,7 +509,7 @@ Key 校验失败时，后三项返回 `"skipped": true`；任一模型测试失�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/knowledge/upload` | 上传文档（支持 `.txt` `.md` `.json`） |
+| POST | `/api/knowledge/upload` | 上传文档（支持 `.txt` `.md` `.json` `.jsonl`） |
 | GET | `/api/knowledge/list` | 列出已上传文件 |
 | DELETE | `/api/knowledge/{filename}` | 删除指定文件 |
 | POST | `/api/knowledge/rebuild` | 重建全部索引 |
@@ -573,15 +583,30 @@ Key 校验失败时，后三项返回 `"skipped": true`；任一模型测试失�
 导入脚本：
 
 ```bash
-python -m scripts.prepare_datasets   # 格式转换与下载
-python -m scripts.import_data        # 分块并写入 ChromaDB
+python -m scripts.prepare_datasets       # 格式转换与下载
+python -m scripts.import_data            # 增量导入：已存在的分块自动跳过
+python -m scripts.import_data --rebuild  # 清空 laws/cases 集合后全量重建
+python -m scripts.import_data --all-cases  # 本次不限制新增案例数
 ```
+
+导入采用「确定性分块 ID + 写前查重」：重复执行不会产生重复向量，中断后直接重跑即可断点续传。`--max-cases` 控制单次新增案例数（默认 5000，已存在案例不占用额度），便于把大规模案例导入拆成多次执行。
+
+这套逻辑位于 `app/services/kb_importer.py`，CLI 导入与前端「上传文档 / 重建索引」共用：
+
+| 入口 | 行为 |
+|------|------|
+| `python -m scripts.import_data` | 递归扫描 `laws_slight/`、`cases_slight/`，跳过已存在分块 |
+| 前端「重建索引」 | 删除 `laws`/`cases` 集合后按同一套 ID 全量重建 |
+| 前端「上传文档」 | 保存文件后按同一套 ID 增量写入；同一文件重复上传不会重复入库 |
+| 前端「删除文件」 | 删除文件并同步清理 `source_file` 对应的全部分块 |
+
+分块元数据同时记录 `import_version`、`embedding_model`、`contextual_chunking` 与 `content_hash`。前三项决定「是否需要重新 Embedding」，`content_hash` 用于识别同一位置的内容是否发生变化；任一不一致都会用相同 ID 覆盖更新。
 
 ---
 
 ## 测试
 
-单元测试分布在 6 个测试文件中：
+单元测试分布在 8 个测试文件中：
 
 | 测试文件 | 覆盖范围 |
 |---------|---------|
@@ -591,6 +616,8 @@ python -m scripts.import_data        # 分块并写入 ChromaDB
 | `test_kg.py` | 知识图谱加载、罪名查找 |
 | `test_api_key.py` | 用户自带 Key：校验、上下文、401 行为 |
 | `test_model_config.py` | 请求级模型覆盖：默认值回退、请求头校验、模型分类 |
+| `test_import_idempotent.py` | 批量导入幂等、缺失分块修复、`--rebuild` 清库、案例续传 |
+| `test_kb_service_idempotent.py` | 前端上传/重建与批量导入共用确定性 ID、旧版数据拦截 |
 
 ```bash
 cd backend && pytest tests/ -v

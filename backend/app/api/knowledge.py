@@ -10,6 +10,7 @@ from app.services.kb_service import (
     rebuild_index,
     get_kb_stats,
 )
+from app.services.kb_importer import LegacyIndexError
 
 router = APIRouter(prefix="/knowledge", tags=["知识库"])
 
@@ -20,7 +21,7 @@ async def upload(
     doc_type: str | None = Form(None),
 ):
     """上传文档到知识库"""
-    allowed_ext = {".txt", ".md", ".json"}
+    allowed_ext = {".txt", ".md", ".json", ".jsonl"}
     filename = file.filename or "unknown.txt"
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext not in allowed_ext:
@@ -30,7 +31,12 @@ async def upload(
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="文件内容为空")
 
-    result = await upload_document(filename, content, doc_type)
+    try:
+        result = await upload_document(filename, content, doc_type)
+    except LegacyIndexError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return APIResponse(data=result.model_dump())
 
 
@@ -47,13 +53,16 @@ async def delete_file(filename: str):
     ok = delete_document(filename)
     if not ok:
         raise HTTPException(status_code=404, detail=f"文件不存在: {filename}")
-    return APIResponse(message=f"已删除 {filename}，请重建索引以更新向量库")
+    return APIResponse(message=f"已删除 {filename}，并同步清理对应向量分块")
 
 
 @router.post("/rebuild", response_model=APIResponse, dependencies=[Depends(api_key_dependency)])
 async def rebuild():
     """重建知识库索引"""
-    stats = await rebuild_index()
+    try:
+        stats = await rebuild_index()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     return APIResponse(data=stats.model_dump())
 
 
